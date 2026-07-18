@@ -995,7 +995,12 @@ class LFG(commands.Cog):
         try:
             print(f"🎮 Tentando criar call: guild={guilda.name}, author={autor.display_name}")
             canal_ref = guilda.get_channel(1519161977492996256)
-            categoria = canal_ref.category if canal_ref else None
+            if canal_ref and isinstance(canal_ref, discord.CategoryChannel):
+                categoria = canal_ref
+            elif canal_ref:
+                categoria = canal_ref.category
+            else:
+                categoria = None
 
             permissoes = {
                 guilda.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),

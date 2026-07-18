@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
 
-from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos
+from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS
 from checkin_helper import registrar_checkin, finalizar_checkin, obter_checkins
 
 FUSO = timezone(timedelta(hours=-3))
@@ -994,13 +994,12 @@ class LFG(commands.Cog):
         """Cria a voice channel de conteúdo. Retorna call_id ou None."""
         try:
             print(f"🎮 Tentando criar call: guild={guilda.name}, author={autor.display_name}")
-            canal_ref = guilda.get_channel(1519161977492996256)
-            if canal_ref and isinstance(canal_ref, discord.CategoryChannel):
-                categoria = canal_ref
-            elif canal_ref:
-                categoria = canal_ref.category
-            else:
-                categoria = None
+            categoria = None
+            for canal_id in CANAIS_GERADORES_IDS:
+                canal_gerador = guilda.get_channel(canal_id)
+                if canal_gerador and canal_gerador.category:
+                    categoria = canal_gerador.category
+                    break
 
             permissoes = {
                 guilda.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),

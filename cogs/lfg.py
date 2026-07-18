@@ -994,18 +994,23 @@ class LFG(commands.Cog):
         """Cria a voice channel de conteúdo. Retorna call_id ou None."""
         try:
             print(f"🎮 Tentando criar call: guild={guilda.name}, author={autor.display_name}")
-            categoria = None
-            for cat in guilda.categories:
-                if cat.name.lower() in ("conteúdos", "conteudos", "conteúdo", "conteudo"):
-                    categoria = cat
-                    break
+            canal_ref = guilda.get_channel(1519161977492996256)
+            categoria = canal_ref.category if canal_ref else None
+
+            permissoes = {
+                guilda.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
+                autor: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
+            }
+
+            for nome, id_cargo in CARGOS.items():
+                cargo_obj = guilda.get_role(id_cargo)
+                if cargo_obj:
+                    permissoes[cargo_obj] = discord.PermissionOverwrite(view_channel=True, connect=True)
+
             call = await guilda.create_voice_channel(
                 name=f"🎮 [DH] {conteudo[:50]}",
                 category=categoria,
-                overwrites={
-                    guilda.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
-                    autor: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
-                }
+                overwrites=permissoes,
             )
             print(f"✅ Call criada com sucesso! ID: {call.id}")
             return call.id

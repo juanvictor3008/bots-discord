@@ -1,5 +1,5 @@
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 import os
 import sys
 from dotenv import load_dotenv
@@ -30,10 +30,25 @@ class MeuBot(commands.Bot):
 
 bot = MeuBot(command_prefix="!", intents=intents, help_command=None)
 
+@tasks.loop(minutes=30)
+async def manter_mongo_vivo():
+    try:
+        from config import mongo_client
+        await mongo_client.admin.command('ping')
+    except Exception:
+        print("⚠️ Ping MongoDB falhou, reconectando...")
+        try:
+            from config import mongo_client
+            mongo_client.close()
+        except Exception:
+            pass
+
 @bot.event
 async def on_ready():
     synced = await bot.tree.sync()
     print(f'🔥 Sistema Mestre online! Operando como {bot.user}. Sincronizados {len(synced)} comandos slash.')
+    if not manter_mongo_vivo.is_running():
+        manter_mongo_vivo.start()
 
 keep_alive() 
 bot.run(os.getenv('TOKEN_DO_BOT'))

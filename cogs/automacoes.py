@@ -12,7 +12,7 @@ from config import (
     MINIMO_PESSOAS_CALL, PONTOS_POR_CICLO,
     MULTIPLICADOR_CALLER, MENSAGEM_CLASSES_ID, REACOES_CLASSES, CANAIS_GERADORES_IDS
 )
-from checkin_helper import registrar_checkin, finalizar_checkin
+
 
 # Arquivo JSON para tempo de call (fallback local)
 ARQUIVO_TEMPO = "data/tempo_call.json"
@@ -416,7 +416,7 @@ class Automacoes(commands.Cog):
                 except Exception as e:
                     print(f"⚠️ Erro ao apagar call temporária: {e}")
 
-        # --- 3. CHECK-IN EM CALLS DE CONTEÚDO ---
+        # --- 3. TIMER DE CALL VAZIA + PRESENÇA ---
         try:
             lfg_cog = self.bot.get_cog("LFG")
             if lfg_cog:
@@ -426,25 +426,37 @@ class Automacoes(commands.Cog):
                     if cid and not evento.get("encerrado"):
                         call_ids_ativos.add(cid)
 
+                print(f"📋 Call IDs ativos: {call_ids_ativos}")
+
                 if after.channel and not before.channel:
                     if after.channel.id in call_ids_ativos:
-                        evento = next((e for e in lfg_cog.eventos_ativos if e.get("call_id") == after.channel.id), None)
-                        if evento:
-                            await registrar_checkin(id_str, evento["conteudo"], after.channel.id)
+                        lfg_cog._cancelar_timer_vazio(after.channel.id)
+                        lfg_cog.registrar_entrada_call(after.channel.id, id_str)
 
                 elif before.channel and not after.channel:
                     if before.channel.id in call_ids_ativos:
-                        await finalizar_checkin(id_str, before.channel.id)
+                        lfg_cog.registrar_saida_call(before.channel.id, id_str)
+                        canal = member.guild.get_channel(before.channel.id)
+                        membros_restantes = len(canal.members) if canal else -1
+                        print(f"🚪 {member.name} saiu de call ativa. Membros restantes: {membros_restantes}")
+                        if canal and len(canal.members) == 0:
+                            print(f"⏳ Iniciando timer de {lfg_cog.TEMPO_TOLERANCIA_VAZIA}s para call {before.channel.id}")
+                            lfg_cog._iniciar_timer_vazio(before.channel.id)
 
                 elif before.channel and after.channel and before.channel.id != after.channel.id:
                     if before.channel.id in call_ids_ativos:
-                        await finalizar_checkin(id_str, before.channel.id)
+                        lfg_cog.registrar_saida_call(before.channel.id, id_str)
+                        canal = member.guild.get_channel(before.channel.id)
+                        membros_restantes = len(canal.members) if canal else -1
+                        print(f"🔀 {member.name} trocou de call. Membros restantes na origem: {membros_restantes}")
+                        if canal and len(canal.members) == 0:
+                            print(f"⏳ Iniciando timer de {lfg_cog.TEMPO_TOLERANCIA_VAZIA}s para call {before.channel.id}")
+                            lfg_cog._iniciar_timer_vazio(before.channel.id)
                     if after.channel.id in call_ids_ativos:
-                        evento = next((e for e in lfg_cog.eventos_ativos if e.get("call_id") == after.channel.id), None)
-                        if evento:
-                            await registrar_checkin(id_str, evento["conteudo"], after.channel.id)
+                        lfg_cog._cancelar_timer_vazio(after.channel.id)
+                        lfg_cog.registrar_entrada_call(after.channel.id, id_str)
         except Exception as e:
-            pass
+            print(f"⚠️ Erro no timer de call vazia: {type(e).__name__}: {e}")
 
 
 async def setup(bot):

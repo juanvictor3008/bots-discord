@@ -55,7 +55,15 @@ CARGOS_PERMITIDOS_SORTEIO = ["lider", "SUB-LIDER", "moderador"]
 # Conexão MongoDB
 MONGO_URI = os.getenv('MONGO_URI')
 if MONGO_URI:
-    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URI, tlsCAFile=certifi.where())
+    mongo_client = motor.motor_asyncio.AsyncIOMotorClient(
+        MONGO_URI,
+        tlsCAFile=certifi.where(),
+        serverSelectionTimeoutMS=5000,
+        connectTimeoutMS=10000,
+        socketTimeoutMS=20000,
+        maxPoolSize=50,
+        retryWrites=True,
+    )
     db = mongo_client["guilda_bot"]
     colecao_pontos = db["pontos"]
     colecao_sorteio_config = db["sorteio_config"]
@@ -63,7 +71,6 @@ if MONGO_URI:
     colecao_tempo_call = db["tempo_call"]
     colecao_templates = db["templates"]
     colecao_eventos = db["eventos"]
-    colecao_checkin = db["checkin"]
 else:
     colecao_pontos = None
     colecao_sorteio_config = None
@@ -71,5 +78,4 @@ else:
     colecao_tempo_call = None
     colecao_templates = None
     colecao_eventos = None
-    colecao_checkin = None
     print("⚠️ MONGO_URI não encontrada!")

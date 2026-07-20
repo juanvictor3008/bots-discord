@@ -7,8 +7,8 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
 
-from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS
-from checkin_helper import registrar_checkin, finalizar_checkin, obter_checkins
+from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_pontos
+
 
 FUSO = timezone(timedelta(hours=-3))
 
@@ -77,6 +77,7 @@ async def carregar_eventos():
 
 
 async def salvar_eventos(eventos):
+    eventos = eventos_validos(eventos)
     if _usando_mongo():
         await colecao_eventos.delete_many({})
         if eventos:
@@ -247,7 +248,7 @@ class ModalPuxarMembro(discord.ui.Modal, title="👑 Puxar Membro para a PT"):
 
 
 class PainelVagas(discord.ui.View):
-    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None):
+    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None, foods=1):
         super().__init__(timeout=None)
         self.conteudo = conteudo
         self.max_vagas = definicao_vagas
@@ -255,6 +256,8 @@ class PainelVagas(discord.ui.View):
         self.unix_timestamp = unix_timestamp
         self.descricao = descricao
         self.call_id = call_id
+        self.foods = foods
+        self.teto_pontos = foods * 10
         self.jogadores = {classe: [] for classe in definicao_vagas}
         self.fila_espera = {classe: [] for classe in definicao_vagas}
         self.encerrado = False
@@ -299,6 +302,7 @@ class PainelVagas(discord.ui.View):
             cor_embed = discord.Color.brand_red()
 
         desc_embed = f"**Líder da PT:** <@{self.autor_id}>\n**Status:** {status_texto}\n"
+        desc_embed += f"🍕 **Foods:** {self.foods} | **Teto:** {self.teto_pontos} pts\n"
         if self.descricao:
             desc_embed += f"{self.descricao}\n"
         if self.call_id:
@@ -427,23 +431,26 @@ class PainelVagas(discord.ui.View):
         await salvar_eventos(eventos_atuais)
 
         if call_id:
-            try:
-                canal = interaction.guild.get_channel(call_id)
-                if canal:
-                    for membro in list(canal.members):
-                        if not membro.bot:
-                            await finalizar_checkin(str(membro.id), call_id)
-            except Exception:
-                pass
+            lfg_cog = interaction.client.get_cog("LFG")
+            if lfg_cog:
+                lfg_cog._cancelar_timer_vazio(call_id)
+                resultados = lfg_cog.calcular_pontos(call_id, self)
+                if resultados:
+                    await lfg_cog.salvar_pontos(resultados, self.conteudo)
+                    linhas = []
+                    for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
+                        linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
+                    embed_pts = discord.Embed(
+                        title="🏆 Pontos do Conteúdo",
+                        description="\n".join(linhas),
+                        color=discord.Color.gold()
+                    )
+                    embed_pts.set_footer(text=f"Teto: {self.teto_pontos} pts ({self.foods} foods)")
+                    await interaction.followup.send(embed=embed_pts)
 
-            relatorio = await self._gerar_relatorio_checkin(call_id)
-            if relatorio:
-                await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-                await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
-                await interaction.followup.send(embed=relatorio)
-            else:
-                await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-                await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
+        if call_id:
+            await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+            await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
 
             try:
                 canal = interaction.guild.get_channel(call_id)
@@ -454,39 +461,6 @@ class PainelVagas(discord.ui.View):
         else:
             await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
             await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
-
-    async def _gerar_relatorio_checkin(self, call_id):
-        checkins = await obter_checkins(call_id)
-        if not checkins:
-            return None
-
-        linhas_presentes = []
-        linhas_ausentes = []
-
-        for classe, jogadores in self.jogadores.items():
-            for jogador in jogadores:
-                user_id = jogador.strip("<@!>")
-                ci = next((c for c in checkins if c["user_id"] == user_id), None)
-                if ci and ci.get("minutos", 0) > 0:
-                    linhas_presentes.append(f"• {jogador} — {ci['minutos']} min")
-                else:
-                    linhas_ausentes.append(f"• {jogador}")
-
-        texto = ""
-        if linhas_presentes:
-            texto += "**✅ Presentes:**\n" + "\n".join(linhas_presentes) + "\n\n"
-        if linhas_ausentes:
-            texto += "**❌ Ausentes (inscrito mas não entrou na call):**\n" + "\n".join(linhas_ausentes)
-        if not texto:
-            texto = "Nenhum check-in registrado."
-
-        embed = discord.Embed(
-            title=f"📋 Presença — {self.conteudo}",
-            description=texto,
-            color=discord.Color.blue()
-        )
-        embed.set_footer(text="Relatório de check-in")
-        return embed
 
     def encerrer_painel(self):
         self.encerrado = True
@@ -804,8 +778,16 @@ class ModalUsarTemplate(discord.ui.Modal, title="🎮 Criar Conteúdo (Template)
             placeholder="20:30 | amanha 20:30 | sex 20:30",
             required=False,
         )
+        self.foods_texto = discord.ui.TextInput(
+            label="Foods (1 food = 30min, teto de pontos)",
+            style=discord.TextStyle.short,
+            placeholder="Ex: 2 (pontos máx = 20)",
+            max_length=3,
+            required=True,
+        )
         self.add_item(self.titulo)
         self.add_item(self.horario_texto)
+        self.add_item(self.foods_texto)
 
     async def on_submit(self, interaction: discord.Interaction):
         conteudo = self.titulo.value.strip()
@@ -817,12 +799,24 @@ class ModalUsarTemplate(discord.ui.Modal, title="🎮 Criar Conteúdo (Template)
                 ephemeral=True
             )
 
+        foods_str = self.foods_texto.value.strip()
+        if not foods_str.isdigit():
+            return await interaction.response.send_message(
+                "❌ Foods precisa ser um número (mínimo 1).", ephemeral=True
+            )
+        foods = int(foods_str)
+        if foods < 1 or foods > 20:
+            return await interaction.response.send_message(
+                "❌ Foods deve ser entre 1 e 20.", ephemeral=True
+            )
+
         await self.cog.publicar_painel(
             interaction,
             conteudo,
             dict(self.template["vagas"]),
             self.template.get("descricao"),
             horario_input,
+            foods,
         )
 
 
@@ -917,6 +911,13 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
         placeholder="20:30 | amanha 20:30 | sex 20:30",
         required=False,
     )
+    foods_texto = discord.ui.TextInput(
+        label="Foods (1 food = 30min, teto de pontos)",
+        style=discord.TextStyle.short,
+        placeholder="Ex: 2 (pontos máx = 20)",
+        max_length=3,
+        required=True,
+    )
 
     def __init__(self, cog: "LFG"):
         super().__init__()
@@ -957,7 +958,18 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
                 ephemeral=True
             )
 
-        await self.cog.publicar_painel(interaction, conteudo, definicao_vagas, descricao, horario_input)
+        foods_str = self.foods_texto.value.strip()
+        if not foods_str.isdigit():
+            return await interaction.response.send_message(
+                "❌ Foods precisa ser um número (mínimo 1).", ephemeral=True
+            )
+        foods = int(foods_str)
+        if foods < 1 or foods > 20:
+            return await interaction.response.send_message(
+                "❌ Foods deve ser entre 1 e 20.", ephemeral=True
+            )
+
+        await self.cog.publicar_painel(interaction, conteudo, definicao_vagas, descricao, horario_input, foods)
 
 
 # ==========================================
@@ -965,17 +977,170 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
 # ==========================================
 
 class LFG(commands.Cog):
+    TEMPO_TOLERANCIA_VAZIA = 300  # 5 minutos
+
     def __init__(self, bot):
         self.bot = bot
         self.eventos_ativos = []
         self.templates = {}
         self.paineis_ativos = {}
+        self.timers_vazio = {}  # {call_id: asyncio.Task}
+        self.presenca_calls = {}  # {call_id: {user_id: {"entrada": datetime, "minutos": 0}}}
 
     @commands.Cog.listener()
     async def on_ready(self):
         self.eventos_ativos = eventos_validos(await carregar_eventos())
         await salvar_eventos(self.eventos_ativos)
         self.templates = await carregar_templates()
+
+    def _iniciar_timer_vazio(self, call_id):
+        if call_id in self.timers_vazio:
+            return
+        self.timers_vazio[call_id] = asyncio.create_task(self._auto_encerrar(call_id))
+
+    def _cancelar_timer_vazio(self, call_id):
+        task = self.timers_vazio.pop(call_id, None)
+        if task and not task.done():
+            task.cancel()
+
+    def registrar_entrada_call(self, call_id, user_id):
+        if call_id not in self.presenca_calls:
+            self.presenca_calls[call_id] = {}
+        self.presenca_calls[call_id][user_id] = {
+            "entrada": datetime.now(timezone.utc),
+            "minutos": 0,
+        }
+
+    def registrar_saida_call(self, call_id, user_id):
+        dados = self.presenca_calls.get(call_id, {}).get(user_id)
+        if not dados:
+            return
+        agora = datetime.now(timezone.utc)
+        entrada = dados["entrada"]
+        if entrada.tzinfo is None:
+            entrada = entrada.replace(tzinfo=timezone.utc)
+        minutos = int((agora - entrada).total_seconds() / 60)
+        dados["minutos"] += minutos
+        del self.presenca_calls[call_id][user_id]
+
+    def calcular_pontos(self, call_id, painel):
+        presencas = self.presenca_calls.pop(call_id, {})
+        for user_id, dados in presencas.items():
+            agora = datetime.now(timezone.utc)
+            entrada = dados["entrada"]
+            if entrada.tzinfo is None:
+                entrada = entrada.replace(tzinfo=timezone.utc)
+            dados["minutos"] += int((agora - entrada).total_seconds() / 60)
+
+        teto = painel.teto_pontos
+        inscritos = set()
+        for lista in painel.jogadores.values():
+            for mencao in lista:
+                uid = mencao.strip("<@!>")
+                if uid.isdigit():
+                    inscritos.add(uid)
+
+        resultados = {}
+        todos_users = set(inscritos) | set(presencas.keys())
+        for user_id in todos_users:
+            if user_id not in inscritos:
+                continue
+            dados = presencas.get(user_id, {"minutos": 0})
+            minutos = dados.get("minutos", 0)
+            if minutos <= 0:
+                continue
+            pontos = (minutos // 30) * 10
+            if pontos <= 0:
+                continue
+            pontos = min(pontos, teto)
+            resultados[user_id] = {"minutos": minutos, "pontos": pontos}
+
+        return resultados
+
+    async def salvar_pontos(self, resultados, conteudo):
+        if not _usando_mongo():
+            return
+        for user_id, dados in resultados.items():
+            doc = await colecao_pontos.find_one({"_id": user_id})
+            total = doc.get("total", 0) + dados["pontos"] if doc else dados["pontos"]
+            historico = doc.get("historico", []) if doc else []
+            historico.append({
+                "conteudo": conteudo,
+                "minutos": dados["minutos"],
+                "pontos": dados["pontos"],
+                "data": datetime.now(timezone.utc).replace(tzinfo=None),
+            })
+            await colecao_pontos.update_one(
+                {"_id": user_id},
+                {"$set": {"total": total, "historico": historico}},
+                upsert=True
+            )
+
+    async def _auto_encerrar(self, call_id):
+        await asyncio.sleep(self.TEMPO_TOLERANCIA_VAZIA)
+        evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and not e.get("encerrado")), None)
+        if not evento:
+            self.timers_vazio.pop(call_id, None)
+            return
+        guilda = self.bot.guilds[0] if self.bot.guilds else None
+        if not guilda:
+            self.timers_vazio.pop(call_id, None)
+            return
+        canal = guilda.get_channel(call_id)
+        if canal and len(canal.members) > 0:
+            self.timers_vazio.pop(call_id, None)
+            return
+        painel = None
+        msg_id = None
+        for mid, p in self.paineis_ativos.items():
+            if p.call_id == call_id and not p.encerrado:
+                painel = p
+                msg_id = mid
+                break
+        if not painel:
+            self.timers_vazio.pop(call_id, None)
+            return
+        painel.encerrer_painel()
+        evento["encerrado"] = True
+        await salvar_eventos(self.eventos_ativos)
+        resultados = self.calcular_pontos(call_id, painel)
+        if resultados:
+            await self.salvar_pontos(resultados, painel.conteudo)
+        autor = guilda.get_member(painel.autor_id)
+        if canal:
+            try:
+                await canal.delete()
+            except Exception:
+                pass
+        self.timers_vazio.pop(call_id, None)
+        if msg_id:
+            for ch in guilda.text_channels:
+                try:
+                    msg = await ch.fetch_message(msg_id)
+                    await msg.edit(embed=painel.gerar_embed())
+                    await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.")
+                    if resultados:
+                        linhas = []
+                        for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
+                            linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
+                        embed_pts = discord.Embed(
+                            title="🏆 Pontos do Conteúdo",
+                            description="\n".join(linhas),
+                            color=discord.Color.gold()
+                        )
+                        embed_pts.set_footer(text=f"Teto: {painel.teto_pontos} pts ({painel.foods} foods)")
+                        await ch.send(embed=embed_pts)
+                    break
+                except Exception:
+                    continue
+        if autor:
+            try:
+                await autor.send(
+                    f"⏳ Sua PT **{painel.conteudo}** foi encerrada automaticamente por call vazia "
+                    f"(inatividade de {self.TEMPO_TOLERANCIA_VAZIA // 60} min)."
+                )
+            except Exception:
+                pass
 
     def montar_embed_templates(self):
         embed = discord.Embed(title="📋 Templates Salvos — Die Hard", color=discord.Color.blurple())
@@ -1081,7 +1246,7 @@ class LFG(commands.Cog):
                         pass
                 break
 
-    async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input):
+    async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, foods=1):
         """Cria e posta o painel de vagas — usado tanto pelo fluxo 'do zero' quanto por template."""
         unix_timestamp = interpretar_horario(horario_input) if horario_input else None
 
@@ -1097,7 +1262,7 @@ class LFG(commands.Cog):
         else:
             call_id = await self._criar_call_conteudo(interaction.guild, interaction.user, conteudo)
 
-        painel = PainelVagas(conteudo, definicao_vagas, interaction.user.id, unix_timestamp, descricao, call_id)
+        painel = PainelVagas(conteudo, definicao_vagas, interaction.user.id, unix_timestamp, descricao, call_id, foods)
         embed_inicial = painel.gerar_embed()
 
         id_cargo_membro = CARGOS.get("DIE HARD")
@@ -1114,6 +1279,7 @@ class LFG(commands.Cog):
             "jump_url": mensagem_painel.jump_url,
             "encerrado": False,
             "call_id": call_id,
+            "foods": foods,
         })
         await salvar_eventos(self.eventos_ativos)
 
@@ -1176,50 +1342,74 @@ class LFG(commands.Cog):
 
         await ctx.send(embed=embed)
 
-    @commands.command(name="checkin")
-    async def checkin(self, ctx):
-        call_id = None
-        for evento in self.eventos_ativos:
-            if not evento.get("encerrado") and evento.get("call_id"):
-                call_id = evento["call_id"]
-                break
+    @commands.command(name="pontos")
+    async def pontos(self, ctx, membro: discord.Member = None):
+        if not _usando_mongo():
+            return await ctx.send("❌ Sistema de pontos requer MongoDB.")
 
-        if not call_id:
-            return await ctx.send("❌ Nenhuma PT ativa com call encontrada.")
+        if membro is None:
+            membro = ctx.author
 
-        canal = ctx.guild.get_channel(call_id)
-        if not canal:
-            return await ctx.send("❌ Call não encontrada.")
+        doc = await colecao_pontos.find_one({"_id": str(membro.id)})
+        if not doc:
+            return await ctx.send(f"❌ {membro.mention} não tem pontos registrados.")
 
-        checkins = await obter_checkins(call_id)
+        total = doc.get("total", 0)
+        historico = doc.get("historico", [])
+        ultimos = historico[-5:] if historico else []
 
         embed = discord.Embed(
-            title=f"📋 Check-in — {canal.name.replace('🎮 ', '')}",
-            color=discord.Color.blue()
+            title=f"🏆 Pontos — {membro.display_name}",
+            description=f"**Total:** {total} pts",
+            color=discord.Color.gold()
         )
 
-        presentes = []
-        for membro in canal.members:
-            if not membro.bot:
-                ci = next((c for c in checkins if c["user_id"] == str(membro.id)), None)
-                if ci:
-                    entrada = ci["entrou_em"]
-                    if isinstance(entrada, datetime):
-                        if entrada.tzinfo is None:
-                            entrada = entrada.replace(tzinfo=timezone.utc)
-                        minutos = int((datetime.now(timezone.utc) - entrada).total_seconds() / 60)
-                        presentes.append(f"• {membro.mention} — {minutos} min")
-                    else:
-                        presentes.append(f"• {membro.mention}")
+        if ultimos:
+            linhas = []
+            for h in reversed(ultimos):
+                data = h.get("data")
+                if isinstance(data, datetime):
+                    data_str = data.strftime("%d/%m/%y")
                 else:
-                    presentes.append(f"• {membro.mention} — recém-chegou")
+                    data_str = "?"
+                linhas.append(f"• {h['conteudo']} — {h['pontos']} pts ({h['minutos']} min) [{data_str}]")
+            embed.add_field(name="Últimos conteúdos", value="\n".join(linhas), inline=False)
 
-        if presentes:
-            embed.description = f"**Presentes na call:** {len(presentes)}\n\n" + "\n".join(presentes)
-        else:
-            embed.description = "Nenhum membro na call no momento."
-
+        embed.set_footer(text=f"Histórico: {len(historico)} conteúdos participados")
         await ctx.send(embed=embed)
+
+    @commands.command(name="ranking")
+    async def ranking(self, ctx):
+        if not _usando_mongo():
+            return await ctx.send("❌ Sistema de pontos requer MongoDB.")
+
+        await ctx.send("⏳ Calculando ranking...")
+
+        ranking_docs = []
+        async for doc in colecao_pontos.find({}):
+            ranking_docs.append(doc)
+
+        ranking_docs.sort(key=lambda x: x.get("total", 0), reverse=True)
+        top15 = ranking_docs[:15]
+
+        if not top15:
+            return await ctx.send("❌ Nenhum ponto registrado ainda.")
+
+        medalhas = ["🥇", "🥈", "🥉"]
+        linhas = []
+        for i, doc in enumerate(top15):
+            membro = ctx.guild.get_member(int(doc["_id"]))
+            nome = membro.display_name if membro else doc["_id"]
+            medalha = medalhas[i] if i < 3 else f"**{i+1}.**"
+            linhas.append(f"{medalha} {nome} — {doc.get('total', 0)} pts")
+
+        embed = discord.Embed(
+            title="🏆 Ranking — Die Hard",
+            description="\n".join(linhas),
+            color=discord.Color.gold()
+        )
+        await ctx.send(embed=embed)
+
 
 # Função para inicializar e plugar essa engrenagem no main.py
 async def setup(bot):

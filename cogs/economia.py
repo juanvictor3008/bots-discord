@@ -6,11 +6,6 @@ class Economia(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="pontos", aliases=["saldo"])
-    async def ver_pontos(self, ctx, membro: discord.Member = None):
-        await ctx.send("⚠️ Sistema de pontos desativado no momento.")
-
-
     @commands.command(name="adicionarpontos")
     async def adicionar_pontos_manual(self, ctx, membro: discord.Member, quantidade: int):
         await ctx.send("⚠️ Sistema de pontos desativado no momento.")

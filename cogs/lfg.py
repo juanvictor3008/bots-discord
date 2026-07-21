@@ -1059,19 +1059,32 @@ class LFG(commands.Cog):
         return resultados
 
     async def _auto_encerrar(self, call_id):
+        print(f"🔁 _auto_encerrar iniciado para call_id={call_id} (tipo={type(call_id).__name__})")
         await asyncio.sleep(self.TEMPO_TOLERANCIA_VAZIA)
+        print(f"🔁 Timer expirou para call_id={call_id}. Verificando estado...")
+
         evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and not e.get("encerrado")), None)
         if not evento:
+            print(f"⚠️ _auto_encerrar: evento não encontrado para call_id={call_id}. call_ids_ativos={[e.get('call_id') for e in self.eventos_ativos]}")
             self.timers_vazio.pop(call_id, None)
             return
+
         guilda = self.bot.guilds[0] if self.bot.guilds else None
         if not guilda:
+            print("⚠️ _auto_encerrar: nenhuma guilda encontrada")
             self.timers_vazio.pop(call_id, None)
             return
+
         canal = guilda.get_channel(call_id)
-        if canal and len(canal.members) > 0:
-            self.timers_vazio.pop(call_id, None)
-            return
+        if canal:
+            membros = len(canal.members)
+            print(f"🔊 _auto_encerrar: call {call_id} tem {membros} membro(s)")
+            if membros > 0:
+                self.timers_vazio.pop(call_id, None)
+                return
+        else:
+            print(f"⚠️ _auto_encerrar: canal {call_id} não encontrado (pode ter sido deletado)")
+
         painel = None
         msg_id = None
         for mid, p in self.paineis_ativos.items():
@@ -1080,8 +1093,11 @@ class LFG(commands.Cog):
                 msg_id = mid
                 break
         if not painel:
+            print(f"⚠️ _auto_encerrar: painel não encontrado para call_id={call_id}. paineis_keys={list(self.paineis_ativos.keys())}, paineis_call_ids={[(p.call_id, type(p.call_id).__name__) for p in self.paineis_ativos.values()]}")
             self.timers_vazio.pop(call_id, None)
             return
+
+        print(f"✅ _auto_encerrerando: call_id={call_id}, painel.msg_id={msg_id}, conteudo={painel.conteudo}")
         painel.encerrer_painel()
         evento["encerrado"] = True
         await salvar_eventos(self.eventos_ativos)
@@ -1207,6 +1223,7 @@ class LFG(commands.Cog):
                                 await msg.edit(embed=embed_novo)
                                 painel = self.paineis_ativos.get(msg.id)
                                 if painel:
+                                    painel.call_id = call_id
                                     inscritos = set()
                                     for lista in painel.jogadores.values():
                                         for mencao in lista:

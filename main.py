@@ -45,15 +45,8 @@ async def manter_mongo_vivo():
 
 @bot.event
 async def on_ready():
-    try:
-        guild_obj = discord.Object(id=1519158547881922601)
-        bot.tree.copy_global_to(guild=guild_obj)
-        synced = await bot.tree.sync(guild=guild_obj)
-        print(f'🔥 Sistema Mestre online! Operando como {bot.user}. Sincronizados {len(synced)} comandos slash.')
-    except Exception as e:
-        print(f"⚠️ Erro ao sincronizar comandos: {e}")
-        synced = await bot.tree.sync()
-        print(f'🔥 Sistema Mestre online! (global sync) {len(synced)} comandos.')
+    synced = await bot.tree.sync()
+    print(f'🔥 Sistema Mestre online! Operando como {bot.user}. Sincronizados {len(synced)} comandos slash.')
     if not manter_mongo_vivo.is_running():
         manter_mongo_vivo.start()
 

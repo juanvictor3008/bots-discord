@@ -303,11 +303,11 @@ class PainelVagas(discord.ui.View):
             cor_embed = discord.Color.brand_red()
 
         desc_embed = f"**Líder da PT:** <@{self.autor_id}>\n**Status:** {status_texto}\n"
-        desc_embed += f"🍕 **Foods:** {self.foods} | **Teto:** {self.teto_pontos} pts\n"
-        if self.descricao:
-            desc_embed += f"{self.descricao}\n"
+        desc_embed += f"🍕 **Foods:** {self.foods}\n"
         if self.call_id:
             desc_embed += f"🔊 **Call:** <#{self.call_id}>\n"
+        if self.descricao:
+            desc_embed += f"{self.descricao}\n"
         desc_embed += "━━━━━━━━━━━━━━━━━━━━━━\n"
 
         embed = discord.Embed(

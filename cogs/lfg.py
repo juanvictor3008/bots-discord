@@ -1305,7 +1305,7 @@ class LFG(commands.Cog):
                     break
 
             permissoes = {
-                guilda.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
+                guilda.default_role: discord.PermissionOverwrite(view_channel=False),
                 autor: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
             }
 

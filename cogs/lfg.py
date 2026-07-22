@@ -24,6 +24,17 @@ EVENTOS_PATH = "data/eventos.json"
 def _usando_mongo():
     return MONGO_URI is not None and colecao_templates is not None
 
+def _eh_staff(usuario):
+    if usuario.guild_permissions.administrator:
+        return True
+    ids_staff = [CARGOS.get(n) for n in ["lider", "SUB-LIDER", "moderador"] if CARGOS.get(n)]
+    return any(c.id in ids_staff for c in usuario.roles)
+
+def _eh_lider_ou_staff(usuario, autor_id):
+    if usuario.id == autor_id:
+        return True
+    return _eh_staff(usuario)
+
 # ==========================================
 # PERSISTÊNCIA DE TEMPLATES
 # ==========================================
@@ -77,6 +88,17 @@ async def carregar_eventos():
     return []
 
 
+def _migrar_evento(evento):
+    """Migra evento do formato antigo (encerrado: bool) pro novo (status: str)."""
+    if "status" not in evento:
+        if evento.get("encerrado", False):
+            evento["status"] = "encerrado"
+        else:
+            evento["status"] = "formando"
+        evento.pop("encerrado", None)
+    return evento
+
+
 async def salvar_eventos(eventos):
     eventos = eventos_validos(eventos)
     if _usando_mongo():
@@ -93,8 +115,8 @@ def eventos_validos(eventos):
     agora_ts = int(datetime.now(FUSO).timestamp())
     return [
         e for e in eventos
-        if (e["unix_timestamp"] is None or e["unix_timestamp"] > agora_ts - 3600)
-        and not e.get("encerrado", False)  # Filtra para não listar os encerrados
+        if (e.get("unix_timestamp") is None or e.get("unix_timestamp", 0) > agora_ts - 3600)
+        and e.get("status", "formando") != "encerrado"
     ]
 
 
@@ -200,6 +222,62 @@ class SelectClasses(discord.ui.Select):
         await self.view_pai.processar_clique(interaction, classe)
 
 
+class SelectGerenciarVagas(discord.ui.Select):
+    """Select para líder/staff remover inscritos do painel."""
+    def __init__(self, view_pai):
+        self.view_pai = view_pai
+        opcoes = []
+        for classe, lista in view_pai.jogadores.items():
+            for jogador in lista:
+                label = f"{classe} - {jogador}"
+                opcoes.append(discord.SelectOption(label=label[:100], value=f"{classe}|||{jogador}", description=f"Remover {jogador} de {classe}"))
+        for classe, lista in view_pai.fila_espera.items():
+            for jogador in lista:
+                label = f"{classe} - {jogador} (Fila)"
+                opcoes.append(discord.SelectOption(label=label[:100], value=f"fila|||{classe}|||{jogador}", description=f"Remover {jogador} da fila de {classe}"))
+        if not opcoes:
+            opcoes.append(discord.SelectOption(label="Nenhum inscrito", value="__vazio__", description="Não há jogadores para remover"))
+        super().__init__(
+            placeholder="Selecione um jogador para remover...",
+            options=opcoes[:25],
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        valor = self.values[0]
+        if valor == "__vazio__":
+            return await interaction.response.send_message("Nenhum inscrito para remover.", ephemeral=True)
+
+        if valor.startswith("fila|||"):
+            partes = valor.split("|||")
+            classe = partes[1]
+            jogador = partes[2]
+            if jogador in self.view_pai.fila_espera.get(classe, []):
+                self.view_pai.fila_espera[classe].remove(jogador)
+                self.view_pai._atualizar_select()
+                await interaction.response.edit_message(embed=self.view_pai.gerar_embed(), view=self.view_pai)
+                await interaction.followup.send(f"✅ {jogador} removido da fila de **{classe}**.", ephemeral=True)
+            else:
+                return await interaction.response.send_message("Jogador não encontrado na fila.", ephemeral=True)
+        else:
+            partes = valor.split("|||")
+            classe = partes[0]
+            jogador = partes[1]
+            if jogador in self.view_pai.jogadores.get(classe, []):
+                self.view_pai.jogadores[classe].remove(jogador)
+                self.view_pai._atualizar_select()
+                await interaction.response.edit_message(embed=self.view_pai.gerar_embed(), view=self.view_pai)
+                await self.view_pai.promover_da_fila(interaction, classe)
+                await interaction.followup.send(f"✅ {jogador} removido de **{classe}**.", ephemeral=True)
+            else:
+                return await interaction.response.send_message("Jogador não encontrado nessa classe.", ephemeral=True)
+
+
+class ViewGerenciarVagas(discord.ui.View):
+    def __init__(self, painel):
+        super().__init__(timeout=120)
+        self.add_item(SelectGerenciarVagas(painel))
+
+
 class ModalPuxarMembro(discord.ui.Modal, title="👑 Puxar Membro para a PT"):
     jogador = discord.ui.TextInput(
         label="Nome, @Nick ou ID numérico",
@@ -261,26 +339,41 @@ class PainelVagas(discord.ui.View):
         self.teto_pontos = foods * 10
         self.jogadores = {classe: [] for classe in definicao_vagas}
         self.fila_espera = {classe: [] for classe in definicao_vagas}
-        self.encerrado = False
+        self.status = "formando"
 
-        # Select dropdown para classes (suporta até 25)
+        # Row 0: Select dropdown para classes
         self.select_classes = SelectClasses(self)
         self.add_item(self.select_classes)
 
-        # Botão para Sair da Lista
-        botao_sair = discord.ui.Button(label="Sair da Lista", style=discord.ButtonStyle.danger, emoji="❌", row=1)
-        botao_sair.callback = self.sair_callback
-        self.add_item(botao_sair)
+        # Row 1: Botões principais
+        self.botao_sair = discord.ui.Button(label="Sair da Lista", style=discord.ButtonStyle.danger, emoji="❌", row=1)
+        self.botao_sair.callback = self.sair_callback
+        self.add_item(self.botao_sair)
 
-        # Botão de Encerrar Conteúdo (Call Out)
-        botao_encerrar = discord.ui.Button(label="Encerrar PT", style=discord.ButtonStyle.secondary, emoji="🛑", row=1)
-        botao_encerrar.callback = self.encerrar_callback
-        self.add_item(botao_encerrar)
+        self.botao_encerrar = discord.ui.Button(label="Encerrar PT", style=discord.ButtonStyle.secondary, emoji="🛑", row=1)
+        self.botao_encerrar.callback = self.encerrar_callback
+        self.add_item(self.botao_encerrar)
 
-        # Botão de Editar Conteúdo
-        botao_editar = discord.ui.Button(label="Editar", style=discord.ButtonStyle.primary, emoji="✏️", row=1)
-        botao_editar.callback = self.editar_callback
-        self.add_item(botao_editar)
+        self.botao_editar = discord.ui.Button(label="Editar", style=discord.ButtonStyle.primary, emoji="✏️", row=1)
+        self.botao_editar.callback = self.editar_callback
+        self.add_item(self.botao_editar)
+
+        # Row 2: Botões de gestão
+        self.botao_iniciar = discord.ui.Button(label="Iniciar Conteúdo", style=discord.ButtonStyle.success, emoji="▶️", row=2)
+        self.botao_iniciar.callback = self.iniciar_callback
+        self.add_item(self.botao_iniciar)
+
+        self.botao_gerenciar = discord.ui.Button(label="Gerenciar Vagas", style=discord.ButtonStyle.secondary, emoji="🛠️", row=2)
+        self.botao_gerenciar.callback = self.gerenciar_callback
+        self.add_item(self.botao_gerenciar)
+
+    def _definir_status(self, novo_status):
+        self.status = novo_status
+        if novo_status == "encerrado":
+            for item in self.children:
+                item.disabled = True
+        elif novo_status == "em_andamento":
+            self.botao_iniciar.disabled = True
 
     def _atualizar_select(self):
         novas_opcoes = []
@@ -293,9 +386,14 @@ class PainelVagas(discord.ui.View):
     def gerar_embed(self):
         titulo_destaque = f"💥 {self.conteudo.upper()} 💥"
 
-        if self.encerrado:
+        if self.status == "encerrado":
             status_texto = "🔴 Conteúdo Encerrado / Call Out"
             cor_embed = discord.Color.dark_gray()
+        elif self.status == "em_andamento":
+            status_texto = "🔵 Em Andamento"
+            if self.unix_timestamp:
+                status_texto += f" | ⏱️ **Começa:** <t:{self.unix_timestamp}:R> (<t:{self.unix_timestamp}:f>)"
+            cor_embed = discord.Color.blue()
         else:
             status_texto = "🟢 Formando Grupo"
             if self.unix_timestamp:
@@ -333,7 +431,7 @@ class PainelVagas(discord.ui.View):
             embed.add_field(name=f"🛡️ {classe} ({len(inscritos)}/{vagas_totais})", value=texto_final, inline=True)
             campos += 1
 
-        if self.encerrado:
+        if self.status == "encerrado":
             embed.set_footer(text="Esta PT foi encerrada pelo líder e não aceita mais inscrições.")
         else:
             embed.set_footer(text="Clique nos botões abaixo para entrar ou sair da fila.")
@@ -347,7 +445,7 @@ class PainelVagas(discord.ui.View):
             await interaction.channel.send(f"🎉 {proximo_jogador}, uma vaga abriu e você assumiu como **{classe}**!")
 
     async def processar_clique(self, interaction: discord.Interaction, classe: str):
-        if self.encerrado:
+        if self.status == "encerrado":
             return await interaction.response.send_message("❌ Esta PT já foi encerrada.", ephemeral=True)
 
         usuario = interaction.user.mention
@@ -377,7 +475,7 @@ class PainelVagas(discord.ui.View):
             await interaction.message.edit(embed=self.gerar_embed(), view=self)
 
     async def sair_callback(self, interaction: discord.Interaction):
-        if self.encerrado:
+        if self.status == "encerrado":
             return await interaction.response.send_message("❌ Esta PT já foi encerrada.", ephemeral=True)
 
         usuario = interaction.user.mention
@@ -403,11 +501,48 @@ class PainelVagas(discord.ui.View):
         else:
             await interaction.response.send_message("Você não está inscrito em nenhuma vaga.", ephemeral=True)
 
+    async def iniciar_callback(self, interaction: discord.Interaction):
+        if not _eh_lider_ou_staff(interaction.user, self.autor_id):
+            return await interaction.response.send_message("❌ Apenas o líder da PT ou a Staff pode iniciar o conteúdo.", ephemeral=True)
+
+        if self.status != "formando":
+            return await interaction.response.send_message("❌ O conteúdo já foi iniciado ou encerrado.", ephemeral=True)
+
+        self._definir_status("em_andamento")
+
+        lfg_cog = interaction.client.get_cog("LFG")
+        if lfg_cog:
+            for evento in lfg_cog.eventos_ativos:
+                if evento.get("jump_url") == interaction.message.jump_url:
+                    evento["status"] = "em_andamento"
+                    break
+            await salvar_eventos(lfg_cog.eventos_ativos)
+
+            if self.call_id:
+                canal = interaction.guild.get_channel(self.call_id)
+                if canal:
+                    for membro in canal.members:
+                        if not membro.bot:
+                            lfg_cog.registrar_entrada_call(self.call_id, str(membro.id))
+
+        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+
+    async def gerenciar_callback(self, interaction: discord.Interaction):
+        if not _eh_lider_ou_staff(interaction.user, self.autor_id):
+            return await interaction.response.send_message("❌ Apenas o líder da PT ou a Staff pode gerenciar vagas.", ephemeral=True)
+
+        if self.status == "encerrado":
+            return await interaction.response.send_message("❌ Esta PT já foi encerrada.", ephemeral=True)
+
+        await interaction.response.send_message(
+            "🛠️ **Gerenciar Vagas** — Selecione um jogador para remover da lista:",
+            view=ViewGerenciarVagas(self),
+            ephemeral=True
+        )
+
     async def editar_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.autor_id and not interaction.user.guild_permissions.administrator:
-            ids_staff = [CARGOS.get(n) for n in ["lider", "SUB-LIDER", "moderador"] if CARGOS.get(n)]
-            if not any(c.id in ids_staff for c in interaction.user.roles):
-                return await interaction.response.send_message("❌ Apenas o líder da PT ou a staff pode editar.", ephemeral=True)
+        if not _eh_lider_ou_staff(interaction.user, self.autor_id):
+            return await interaction.response.send_message("❌ Apenas o líder da PT ou a staff pode editar.", ephemeral=True)
 
         vagas_str = "\n".join(f"{c}:{q}" for c, q in self.max_vagas.items())
         modal = ModalEditarConteudo(self, interaction.user)
@@ -417,56 +552,28 @@ class PainelVagas(discord.ui.View):
         await interaction.response.send_modal(modal)
 
     async def encerrar_callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.autor_id and not interaction.user.guild_permissions.administrator:
+        if not _eh_lider_ou_staff(interaction.user, self.autor_id):
             return await interaction.response.send_message("❌ Acesso Negado: Apenas o líder da PT ou a Staff pode fazer o call out!", ephemeral=True)
 
-        self.encerrer_painel()
+        lfg_cog = interaction.client.get_cog("LFG")
+        resultados = {}
+        if lfg_cog:
+            resultados = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
 
-        call_id = None
-        eventos_atuais = await carregar_eventos()
-        for evento in eventos_atuais:
-            if evento.get("jump_url") == interaction.message.jump_url:
-                evento["encerrado"] = True
-                call_id = evento.get("call_id")
-                break
-        await salvar_eventos(eventos_atuais)
+        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+        await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
 
-        if call_id:
-            lfg_cog = interaction.client.get_cog("LFG")
-            if lfg_cog:
-                lfg_cog._cancelar_timer_vazio(call_id)
-                resultados = lfg_cog.calcular_pontos(call_id, self)
-                if resultados:
-                    await salvar_pontos(resultados, self.conteudo)
-                    linhas = []
-                    for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
-                        linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
-                    embed_pts = discord.Embed(
-                        title="🏆 Pontos do Conteúdo",
-                        description="\n".join(linhas),
-                        color=discord.Color.gold()
-                    )
-                    embed_pts.set_footer(text=f"Teto: {self.teto_pontos} pts ({self.foods} foods)")
-                    await interaction.followup.send(embed=embed_pts)
-
-        if call_id:
-            await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-            await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
-
-            try:
-                canal = interaction.guild.get_channel(call_id)
-                if canal:
-                    await canal.delete()
-            except Exception:
-                pass
-        else:
-            await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
-            await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
-
-    def encerrer_painel(self):
-        self.encerrado = True
-        for item in self.children:
-            item.disabled = True
+        if resultados:
+            linhas = []
+            for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
+                linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
+            embed_pts = discord.Embed(
+                title="🏆 Pontos do Conteúdo",
+                description="\n".join(linhas),
+                color=discord.Color.gold()
+            )
+            embed_pts.set_footer(text=f"Teto: {self.teto_pontos} pts ({self.foods} foods)")
+            await interaction.followup.send(embed=embed_pts)
 
 
 class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
@@ -544,12 +651,13 @@ class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
             novas_opcoes.append(discord.SelectOption(label=classe[:100], value=classe, description=texto))
         self.painel.select_classes.options = novas_opcoes[:25]
 
-        eventos_atuais = await carregar_eventos()
-        for evento in eventos_atuais:
-            if evento.get("jump_url") == interaction.message.jump_url:
-                evento["conteudo"] = conteudo
-                break
-        await salvar_eventos(eventos_atuais)
+        lfg_cog = interaction.client.get_cog("LFG")
+        if lfg_cog:
+            for evento in lfg_cog.eventos_ativos:
+                if evento.get("jump_url") == interaction.message.jump_url:
+                    evento["conteudo"] = conteudo
+                    break
+            await salvar_eventos(lfg_cog.eventos_ativos)
 
         if self.painel.call_id:
             try:
@@ -653,10 +761,7 @@ class ViewConfirmarRemocaoTemplate(discord.ui.View):
         criador_id = template.get("criador_id")
         if criador_id and self.usuario.id == criador_id:
             return True
-        if self.usuario.guild_permissions.administrator:
-            return True
-        ids_staff = [CARGOS.get(n) for n in ["lider", "SUB-LIDER", "moderador"] if CARGOS.get(n)]
-        return any(c.id in ids_staff for c in self.usuario.roles)
+        return _eh_staff(self.usuario)
 
     @discord.ui.button(label="✏️ Editar Template", style=discord.ButtonStyle.primary)
     async def editar(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -990,7 +1095,9 @@ class LFG(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        self.eventos_ativos = eventos_validos(await carregar_eventos())
+        eventos_brutos = await carregar_eventos()
+        self.eventos_ativos = [_migrar_evento(e) for e in eventos_brutos]
+        self.eventos_ativos = eventos_validos(self.eventos_ativos)
         await salvar_eventos(self.eventos_ativos)
         self.templates = await carregar_templates()
 
@@ -1058,12 +1165,55 @@ class LFG(commands.Cog):
 
         return resultados
 
+    async def _encerrar_conteudo(self, painel, guilda, jump_url=None):
+        """Método centralizado de encerramento. Usado tanto pelo botão manual quanto pelo auto."""
+        painel._definir_status("encerrado")
+
+        evento = None
+        if painel.call_id:
+            evento = next((e for e in self.eventos_ativos
+                          if e.get("call_id") == painel.call_id
+                          and e.get("status", "formando") != "encerrado"), None)
+        if not evento and jump_url:
+            evento = next((e for e in self.eventos_ativos
+                          if e.get("jump_url") == jump_url
+                          and e.get("status", "formando") != "encerrado"), None)
+        if not evento:
+            evento = next((e for e in self.eventos_ativos
+                          if e.get("conteudo") == painel.conteudo
+                          and e.get("autor_id") == painel.autor_id
+                          and e.get("status", "formando") != "encerrado"), None)
+
+        if evento:
+            evento["status"] = "encerrado"
+
+        if painel.call_id:
+            self._cancelar_timer_vazio(painel.call_id)
+
+        resultados = {}
+        if painel.call_id:
+            resultados = self.calcular_pontos(painel.call_id, painel)
+            if resultados:
+                await salvar_pontos(resultados, painel.conteudo)
+
+        if painel.call_id and guilda:
+            canal = guilda.get_channel(painel.call_id)
+            if canal:
+                try:
+                    await canal.delete()
+                except Exception as e:
+                    print(f"⚠️ Erro ao deletar call {painel.call_id}: {e}")
+
+        self.timers_vazio.pop(painel.call_id, None)
+        await salvar_eventos(self.eventos_ativos)
+        return resultados
+
     async def _auto_encerrar(self, call_id):
         print(f"🔁 _auto_encerrar iniciado para call_id={call_id} (tipo={type(call_id).__name__})")
         await asyncio.sleep(self.TEMPO_TOLERANCIA_VAZIA)
         print(f"🔁 Timer expirou para call_id={call_id}. Verificando estado...")
 
-        evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and not e.get("encerrado")), None)
+        evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and e.get("status", "formando") != "encerrado"), None)
         if not evento:
             print(f"⚠️ _auto_encerrar: evento não encontrado para call_id={call_id}. call_ids_ativos={[e.get('call_id') for e in self.eventos_ativos]}")
             self.timers_vazio.pop(call_id, None)
@@ -1088,7 +1238,7 @@ class LFG(commands.Cog):
         painel = None
         msg_id = None
         for mid, p in self.paineis_ativos.items():
-            if p.call_id == call_id and not p.encerrado:
+            if p.call_id == call_id and p.status != "encerrado":
                 painel = p
                 msg_id = mid
                 break
@@ -1097,20 +1247,9 @@ class LFG(commands.Cog):
             self.timers_vazio.pop(call_id, None)
             return
 
-        print(f"✅ _auto_encerrerando: call_id={call_id}, painel.msg_id={msg_id}, conteudo={painel.conteudo}")
-        painel.encerrer_painel()
-        evento["encerrado"] = True
-        await salvar_eventos(self.eventos_ativos)
-        resultados = self.calcular_pontos(call_id, painel)
-        if resultados:
-            await salvar_pontos(resultados, painel.conteudo)
-        autor = guilda.get_member(painel.autor_id)
-        if canal:
-            try:
-                await canal.delete()
-            except Exception:
-                pass
-        self.timers_vazio.pop(call_id, None)
+        print(f"✅ _auto_encerrando: call_id={call_id}, painel.msg_id={msg_id}, conteudo={painel.conteudo}")
+        resultados = await self._encerrar_conteudo(painel, guilda)
+
         if msg_id:
             for ch in guilda.text_channels:
                 try:
@@ -1131,6 +1270,7 @@ class LFG(commands.Cog):
                     break
                 except Exception:
                     continue
+        autor = guilda.get_member(painel.autor_id)
         if autor:
             try:
                 await autor.send(
@@ -1199,7 +1339,7 @@ class LFG(commands.Cog):
         await asyncio.sleep(segundos_ate)
 
         for evento in self.eventos_ativos:
-            if evento.get("jump_url") == jump_url and not evento.get("encerrado"):
+            if evento.get("jump_url") == jump_url and evento.get("status") != "encerrado":
                 autor = guilda.get_member(autor_id)
                 if not autor:
                     return
@@ -1276,7 +1416,7 @@ class LFG(commands.Cog):
             "autor_id": interaction.user.id,
             "unix_timestamp": unix_timestamp,
             "jump_url": mensagem_painel.jump_url,
-            "encerrado": False,
+            "status": "formando",
             "call_id": call_id,
             "foods": foods,
         })
@@ -1310,7 +1450,8 @@ class LFG(commands.Cog):
 
     @commands.command(name="agenda")
     async def agenda(self, ctx):
-        self.eventos_ativos = eventos_validos(await carregar_eventos())
+        self.eventos_ativos = [_migrar_evento(e) for e in await carregar_eventos()]
+        self.eventos_ativos = eventos_validos(self.eventos_ativos)
         await salvar_eventos(self.eventos_ativos)
 
         if not self.eventos_ativos:
@@ -1318,7 +1459,7 @@ class LFG(commands.Cog):
 
         eventos_ordenados = sorted(
             self.eventos_ativos,
-            key=lambda e: (e["unix_timestamp"] is None, e["unix_timestamp"] or 0)
+            key=lambda e: (e.get("unix_timestamp") is None, e.get("unix_timestamp") or 0)
         )
 
         embed = discord.Embed(
@@ -1328,14 +1469,25 @@ class LFG(commands.Cog):
         )
 
         for evento in eventos_ordenados:
-            if evento["unix_timestamp"]:
+            status_evt = evento.get("status", "formando")
+            if status_evt == "em_andamento":
+                indicador = "🔵"
+                texto_status = "Em andamento"
+            elif evento.get("unix_timestamp"):
+                indicador = "🟡"
+                texto_status = "Agendado"
+            else:
+                indicador = "🟢"
+                texto_status = "Formando"
+
+            if evento.get("unix_timestamp"):
                 quando = f"<t:{evento['unix_timestamp']}:R> — <t:{evento['unix_timestamp']}:f>"
             else:
-                quando = "🟢 Sem horário definido (imediata)"
+                quando = "Sem horário definido (imediata)"
 
             embed.add_field(
-                name=f"💥 {evento['conteudo']}",
-                value=f"**Líder:** <@{evento['autor_id']}>\n**Quando:** {quando}\n[Ir para a PT]({evento['jump_url']})",
+                name=f"{indicador} {evento['conteudo']}",
+                value=f"**Líder:** <@{evento['autor_id']}>\n**Quando:** {quando}\n**Status:** {texto_status}\n[Ir para a PT]({evento['jump_url']})",
                 inline=False
             )
 

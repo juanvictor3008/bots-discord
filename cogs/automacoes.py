@@ -423,15 +423,23 @@ class Automacoes(commands.Cog):
                 call_ids_ativos = set()
                 for evento in lfg_cog.eventos_ativos:
                     cid = evento.get("call_id")
-                    if cid and not evento.get("encerrado"):
+                    if cid and evento.get("status", "formando") != "encerrado":
                         call_ids_ativos.add(cid)
 
                 print(f"📋 Call IDs ativos: {call_ids_ativos}")
 
+                def _painel_do_call(cid):
+                    for p in lfg_cog.paineis_ativos.values():
+                        if p.call_id == cid and p.status != "encerrado":
+                            return p
+                    return None
+
                 if after.channel and not before.channel:
                     if after.channel.id in call_ids_ativos:
                         lfg_cog._cancelar_timer_vazio(after.channel.id)
-                        lfg_cog.registrar_entrada_call(after.channel.id, id_str)
+                        painel = _painel_do_call(after.channel.id)
+                        if painel and painel.status == "em_andamento":
+                            lfg_cog.registrar_entrada_call(after.channel.id, id_str)
 
                 elif before.channel and not after.channel:
                     if before.channel.id in call_ids_ativos:
@@ -454,7 +462,9 @@ class Automacoes(commands.Cog):
                             lfg_cog._iniciar_timer_vazio(before.channel.id)
                     if after.channel.id in call_ids_ativos:
                         lfg_cog._cancelar_timer_vazio(after.channel.id)
-                        lfg_cog.registrar_entrada_call(after.channel.id, id_str)
+                        painel = _painel_do_call(after.channel.id)
+                        if painel and painel.status == "em_andamento":
+                            lfg_cog.registrar_entrada_call(after.channel.id, id_str)
         except Exception as e:
             print(f"⚠️ Erro no timer de call vazia: {type(e).__name__}: {e}")
 

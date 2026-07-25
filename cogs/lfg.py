@@ -199,6 +199,14 @@ def eh_texto_de_horario(texto: str) -> bool:
     return any(re.fullmatch(p, t) for p in padroes)
 
 
+def _extrair_message_id(jump_url):
+    if jump_url:
+        parts = jump_url.rstrip("/").split("/")
+        if len(parts) >= 1:
+            return parts[-1]
+    return None
+
+
 # ==========================================
 # CLASSES DE INTERFACE (BOTÕES E PAINÉIS)
 # ==========================================
@@ -256,6 +264,7 @@ class SelectGerenciarVagas(discord.ui.Select):
                 self.view_pai._atualizar_select()
                 await interaction.response.edit_message(embed=self.view_pai.gerar_embed(), view=self.view_pai)
                 await interaction.followup.send(f"✅ {jogador} removido da fila de **{classe}**.", ephemeral=True)
+                await self.view_pai._sync_state(interaction)
             else:
                 return await interaction.response.send_message("Jogador não encontrado na fila.", ephemeral=True)
         else:
@@ -268,6 +277,7 @@ class SelectGerenciarVagas(discord.ui.Select):
                 await interaction.response.edit_message(embed=self.view_pai.gerar_embed(), view=self.view_pai)
                 await self.view_pai.promover_da_fila(interaction, classe)
                 await interaction.followup.send(f"✅ {jogador} removido de **{classe}**.", ephemeral=True)
+                await self.view_pai._sync_state(interaction)
             else:
                 return await interaction.response.send_message("Jogador não encontrado nessa classe.", ephemeral=True)
 
@@ -327,7 +337,7 @@ class ModalPuxarMembro(discord.ui.Modal, title="👑 Puxar Membro para a PT"):
 
 
 class PainelVagas(discord.ui.View):
-    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None, foods=1):
+    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None, foods=1, message_id=None, jump_url=None):
         super().__init__(timeout=None)
         self.conteudo = conteudo
         self.max_vagas = definicao_vagas
@@ -337,6 +347,8 @@ class PainelVagas(discord.ui.View):
         self.call_id = call_id
         self.foods = foods
         self.teto_pontos = foods * 10
+        self.message_id = message_id
+        self.jump_url = jump_url
         self.jogadores = {classe: [] for classe in definicao_vagas}
         self.fila_espera = {classe: [] for classe in definicao_vagas}
         self.status = "formando"
@@ -367,6 +379,8 @@ class PainelVagas(discord.ui.View):
         self.botao_gerenciar.callback = self.gerenciar_callback
         self.add_item(self.botao_gerenciar)
 
+        self._aplicar_custom_ids()
+
     def _definir_status(self, novo_status):
         self.status = novo_status
         if novo_status == "encerrado":
@@ -382,6 +396,29 @@ class PainelVagas(discord.ui.View):
             texto = f"{len(inscritos)}/{vagas_totais} inscritos"
             novas_opcoes.append(discord.SelectOption(label=classe[:100], value=classe, description=texto))
         self.select_classes.options = novas_opcoes[:25]
+
+    def _aplicar_custom_ids(self):
+        prefix = f"pnl_{self.message_id or 'new'}"
+        self.select_classes.custom_id = f"{prefix}_sel"
+        self.botao_sair.custom_id = f"{prefix}_sair"
+        self.botao_encerrar.custom_id = f"{prefix}_enc"
+        self.botao_editar.custom_id = f"{prefix}_edit"
+        self.botao_iniciar.custom_id = f"{prefix}_init"
+        self.botao_gerenciar.custom_id = f"{prefix}_ger"
+
+    async def _sync_state(self, interaction):
+        lfg_cog = interaction.client.get_cog("LFG")
+        if lfg_cog:
+            for evento in lfg_cog.eventos_ativos:
+                if evento.get("jump_url") == self.jump_url:
+                    evento["jogadores"] = dict(self.jogadores)
+                    evento["fila_espera"] = dict(self.fila_espera)
+                    evento["status"] = self.status
+                    evento["max_vagas"] = dict(self.max_vagas)
+                    if self.call_id:
+                        evento["call_id"] = self.call_id
+                    break
+            await salvar_eventos(lfg_cog.eventos_ativos)
 
     def gerar_embed(self):
         titulo_destaque = f"💥 {self.conteudo.upper()} 💥"
@@ -474,6 +511,8 @@ class PainelVagas(discord.ui.View):
             self._atualizar_select()
             await interaction.message.edit(embed=self.gerar_embed(), view=self)
 
+        await self._sync_state(interaction)
+
     async def sair_callback(self, interaction: discord.Interaction):
         if self.status == "encerrado":
             return await interaction.response.send_message("❌ Esta PT já foi encerrada.", ephemeral=True)
@@ -498,6 +537,7 @@ class PainelVagas(discord.ui.View):
                 await self.promover_da_fila(interaction, classe_abandonada)
                 self._atualizar_select()
                 await interaction.message.edit(embed=self.gerar_embed(), view=self)
+            await self._sync_state(interaction)
         else:
             await interaction.response.send_message("Você não está inscrito em nenhuma vaga.", ephemeral=True)
 
@@ -510,11 +550,16 @@ class PainelVagas(discord.ui.View):
 
         self._definir_status("em_andamento")
 
+        if not self.jump_url:
+            self.jump_url = interaction.message.jump_url
+
         lfg_cog = interaction.client.get_cog("LFG")
         if lfg_cog:
             for evento in lfg_cog.eventos_ativos:
                 if evento.get("jump_url") == interaction.message.jump_url:
                     evento["status"] = "em_andamento"
+                    evento["jogadores"] = dict(self.jogadores)
+                    evento["fila_espera"] = dict(self.fila_espera)
                     break
             await salvar_eventos(lfg_cog.eventos_ativos)
 
@@ -656,6 +701,10 @@ class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
             for evento in lfg_cog.eventos_ativos:
                 if evento.get("jump_url") == interaction.message.jump_url:
                     evento["conteudo"] = conteudo
+                    evento["descricao"] = descricao
+                    evento["max_vagas"] = dict(self.painel.max_vagas)
+                    evento["jogadores"] = dict(self.painel.jogadores)
+                    evento["fila_espera"] = dict(self.painel.fila_espera)
                     break
             await salvar_eventos(lfg_cog.eventos_ativos)
 
@@ -1098,8 +1147,69 @@ class LFG(commands.Cog):
         eventos_brutos = await carregar_eventos()
         self.eventos_ativos = [_migrar_evento(e) for e in eventos_brutos]
         self.eventos_ativos = eventos_validos(self.eventos_ativos)
-        await salvar_eventos(self.eventos_ativos)
         self.templates = await carregar_templates()
+        self.paineis_ativos = {}
+
+        guilda = self.bot.guilds[0] if self.bot.guilds else None
+        eventos_para_remover = []
+
+        for evento in self.eventos_ativos:
+            if evento.get("status") == "encerrado":
+                continue
+
+            if evento.get("status") == "formando" and evento.get("unix_timestamp"):
+                agora_ts = int(datetime.now(FUSO).timestamp())
+                if agora_ts > evento["unix_timestamp"] + 3600:
+                    await self._auto_expirar(evento, guilda)
+                    eventos_para_remover.append(evento)
+                    continue
+
+            message_id_str = evento.get("message_id") or _extrair_message_id(evento.get("jump_url"))
+            if not message_id_str:
+                continue
+
+            max_vagas_raw = evento.get("max_vagas", {})
+            max_vagas = {k: int(v) if isinstance(v, str) else v for k, v in max_vagas_raw.items()}
+            if not max_vagas:
+                continue
+
+            painel = PainelVagas(
+                conteudo=evento["conteudo"],
+                definicao_vagas=max_vagas,
+                autor_id=int(evento["autor_id"]),
+                unix_timestamp=evento.get("unix_timestamp"),
+                descricao=evento.get("descricao"),
+                call_id=evento.get("call_id"),
+                foods=evento.get("foods", 1),
+                message_id=message_id_str,
+                jump_url=evento.get("jump_url"),
+            )
+            painel.status = evento.get("status", "formando")
+            painel.jogadores = evento.get("jogadores", {c: [] for c in max_vagas})
+            painel.fila_espera = evento.get("fila_espera", {c: [] for c in max_vagas})
+            painel._aplicar_custom_ids()
+
+            if painel.status == "encerrado":
+                painel._definir_status("encerrado")
+
+            self.paineis_ativos[int(message_id_str)] = painel
+            self.bot.add_view(painel)
+
+            if painel.call_id and painel.status == "em_andamento" and guilda:
+                try:
+                    canal = guilda.get_channel(painel.call_id)
+                    if canal and len(canal.members) == 0:
+                        self._iniciar_timer_vazio(painel.call_id)
+                    elif not canal:
+                        eventos_para_remover.append(evento)
+                except Exception:
+                    pass
+
+        for evt in eventos_para_remover:
+            if evt in self.eventos_ativos:
+                self.eventos_ativos.remove(evt)
+
+        await salvar_eventos(self.eventos_ativos)
 
     def _iniciar_timer_vazio(self, call_id):
         if call_id in self.timers_vazio:
@@ -1170,7 +1280,11 @@ class LFG(commands.Cog):
         painel._definir_status("encerrado")
 
         evento = None
-        if painel.call_id:
+        if painel.jump_url:
+            evento = next((e for e in self.eventos_ativos
+                          if e.get("jump_url") == painel.jump_url
+                          and e.get("status", "formando") != "encerrado"), None)
+        if not evento and painel.call_id:
             evento = next((e for e in self.eventos_ativos
                           if e.get("call_id") == painel.call_id
                           and e.get("status", "formando") != "encerrado"), None)
@@ -1293,26 +1407,48 @@ class LFG(commands.Cog):
             embed.add_field(name=f"🛡️ {nome}", value=valor, inline=False)
         return embed
 
+    async def _auto_expirar(self, evento, guilda):
+        message_id_str = evento.get("message_id") or _extrair_message_id(evento.get("jump_url"))
+        if message_id_str and guilda:
+            for ch in guilda.text_channels:
+                try:
+                    msg = await ch.fetch_message(int(message_id_str))
+                    if msg.embeds:
+                        embed_novo = msg.embeds[0].copy()
+                        embed_novo.color = discord.Color.dark_gray()
+                        embed_novo.set_footer(text="❌ Este conteúdo expirou (não foi iniciado a tempo).")
+                        await msg.edit(embed=embed_novo, view=None)
+                    break
+                except Exception:
+                    continue
+        if guilda:
+            autor = guilda.get_member(int(evento["autor_id"]))
+            if autor:
+                try:
+                    await autor.send(
+                        f"❌ Sua PT **{evento['conteudo']}** foi automaticamente expirada "
+                        f"(passou mais de 1h do horário agendado sem ser iniciada)."
+                    )
+                except Exception:
+                    pass
+
     async def _criar_call_conteudo(self, guilda, autor, conteudo):
         """Cria a voice channel de conteúdo. Retorna call_id ou None."""
         try:
             print(f"🎮 Tentando criar call: guild={guilda.name}, author={autor.display_name}")
             categoria = None
+            canal_gerador = None
             for canal_id in CANAIS_GERADORES_IDS:
-                canal_gerador = guilda.get_channel(canal_id)
-                if canal_gerador and canal_gerador.category:
-                    categoria = canal_gerador.category
+                c = guilda.get_channel(canal_id)
+                if c and c.category:
+                    canal_gerador = c
+                    categoria = c.category
                     break
 
-            permissoes = {
+            permissoes = dict(canal_gerador.overwrites) if canal_gerador else {
                 guilda.default_role: discord.PermissionOverwrite(view_channel=False),
-                autor: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True),
             }
-
-            for nome, id_cargo in CARGOS.items():
-                cargo_obj = guilda.get_role(id_cargo)
-                if cargo_obj:
-                    permissoes[cargo_obj] = discord.PermissionOverwrite(view_channel=True, connect=True)
+            permissoes[autor] = discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True)
 
             call = await guilda.create_voice_channel(
                 name=f"🎮 [DH] {conteudo[:50]}",
@@ -1349,6 +1485,7 @@ class LFG(commands.Cog):
                 await salvar_eventos(self.eventos_ativos)
 
                 if call_id:
+                    self._iniciar_timer_vazio(call_id)
                     try:
                         canal_msg = guilda.get_channel(int(jump_url.split("/")[-2]))
                         if canal_msg:
@@ -1364,6 +1501,8 @@ class LFG(commands.Cog):
                                 painel = self.paineis_ativos.get(msg.id)
                                 if painel:
                                     painel.call_id = call_id
+                                    if not painel.jump_url:
+                                        painel.jump_url = jump_url
                                     inscritos = set()
                                     for lista in painel.jogadores.values():
                                         for mencao in lista:
@@ -1401,6 +1540,9 @@ class LFG(commands.Cog):
         else:
             call_id = await self._criar_call_conteudo(interaction.guild, interaction.user, conteudo)
 
+        if call_id:
+            self._iniciar_timer_vazio(call_id)
+
         painel = PainelVagas(conteudo, definicao_vagas, interaction.user.id, unix_timestamp, descricao, call_id, foods)
         embed_inicial = painel.gerar_embed()
 
@@ -1409,6 +1551,15 @@ class LFG(commands.Cog):
 
         await interaction.response.send_message(content=f"📢 {mencao_cargo}", embed=embed_inicial, view=painel)
         mensagem_painel = await interaction.original_response()
+
+        painel.message_id = str(mensagem_painel.id)
+        painel.jump_url = mensagem_painel.jump_url
+        painel._aplicar_custom_ids()
+        try:
+            await mensagem_painel.edit(view=painel)
+        except Exception:
+            pass
+
         self.paineis_ativos[mensagem_painel.id] = painel
 
         self.eventos_ativos.append({
@@ -1416,9 +1567,14 @@ class LFG(commands.Cog):
             "autor_id": interaction.user.id,
             "unix_timestamp": unix_timestamp,
             "jump_url": mensagem_painel.jump_url,
+            "message_id": str(mensagem_painel.id),
             "status": "formando",
             "call_id": call_id,
             "foods": foods,
+            "descricao": descricao,
+            "max_vagas": definicao_vagas,
+            "jogadores": {classe: [] for classe in definicao_vagas},
+            "fila_espera": {classe: [] for classe in definicao_vagas},
         })
         await salvar_eventos(self.eventos_ativos)
 

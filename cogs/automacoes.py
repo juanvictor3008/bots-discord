@@ -374,15 +374,8 @@ class Automacoes(commands.Cog):
             guilda = member.guild
             categoria = after.channel.category
 
-            permissoes = {
-                guilda.default_role: discord.PermissionOverwrite(view_channel=False),
-                member: discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True)
-            }
-
-            for nome, id_cargo in CARGOS.items():
-                cargo_obj = guilda.get_role(id_cargo)
-                if cargo_obj:
-                    permissoes[cargo_obj] = discord.PermissionOverwrite(view_channel=True, connect=True)
+            permissoes = dict(after.channel.overwrites)
+            permissoes[member] = discord.PermissionOverwrite(view_channel=True, connect=True, manage_channels=True)
 
             try:
                 novo_canal = await guilda.create_voice_channel(

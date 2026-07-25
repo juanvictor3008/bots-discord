@@ -432,11 +432,11 @@ class Automacoes(commands.Cog):
                         lfg_cog._cancelar_timer_vazio(after.channel.id)
                         painel = _painel_do_call(after.channel.id)
                         if painel and painel.status == "em_andamento":
-                            lfg_cog.registrar_entrada_call(after.channel.id, id_str)
+                            await lfg_cog.registrar_entrada_call(after.channel.id, id_str)
 
                 elif before.channel and not after.channel:
                     if before.channel.id in call_ids_ativos:
-                        lfg_cog.registrar_saida_call(before.channel.id, id_str)
+                        await lfg_cog.registrar_saida_call(before.channel.id, id_str)
                         canal = member.guild.get_channel(before.channel.id)
                         membros_restantes = len(canal.members) if canal else -1
                         print(f"🚪 {member.name} saiu de call ativa. Membros restantes: {membros_restantes}")
@@ -446,7 +446,7 @@ class Automacoes(commands.Cog):
 
                 elif before.channel and after.channel and before.channel.id != after.channel.id:
                     if before.channel.id in call_ids_ativos:
-                        lfg_cog.registrar_saida_call(before.channel.id, id_str)
+                        await lfg_cog.registrar_saida_call(before.channel.id, id_str)
                         canal = member.guild.get_channel(before.channel.id)
                         membros_restantes = len(canal.members) if canal else -1
                         print(f"🔀 {member.name} trocou de call. Membros restantes na origem: {membros_restantes}")
@@ -457,7 +457,7 @@ class Automacoes(commands.Cog):
                         lfg_cog._cancelar_timer_vazio(after.channel.id)
                         painel = _painel_do_call(after.channel.id)
                         if painel and painel.status == "em_andamento":
-                            lfg_cog.registrar_entrada_call(after.channel.id, id_str)
+                            await lfg_cog.registrar_entrada_call(after.channel.id, id_str)
         except Exception as e:
             print(f"⚠️ Erro no timer de call vazia: {type(e).__name__}: {e}")
 

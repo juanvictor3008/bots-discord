@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
 
-from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_pontos
+from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_pontos, colecao_presencas
 from cogs.economia import salvar_pontos
 
 
@@ -23,6 +23,9 @@ EVENTOS_PATH = "data/eventos.json"
 
 def _usando_mongo():
     return MONGO_URI is not None and colecao_templates is not None
+
+def _usando_mongo_presencas():
+    return MONGO_URI is not None and colecao_presencas is not None
 
 def _eh_staff(usuario):
     if usuario.guild_permissions.administrator:
@@ -118,6 +121,61 @@ def eventos_validos(eventos):
         if (e.get("unix_timestamp") is None or e.get("unix_timestamp", 0) > agora_ts - 3600)
         and e.get("status", "formando") != "encerrado"
     ]
+
+
+# ==========================================
+# PERSISTÊNCIA DE PRESENÇAS
+# ==========================================
+
+async def _salvar_presencas_mongo(call_id, presencas_dict):
+    """Salva o dict de presenças de uma call no MongoDB."""
+    if not _usando_mongo_presencas():
+        return
+    usuarios = {}
+    for uid, dados in presencas_dict.items():
+        entrada = dados["entrada"]
+        if hasattr(entrada, "isoformat"):
+            entrada = entrada.isoformat()
+        usuarios[uid] = {"entrada": entrada, "minutos": dados.get("minutos", 0)}
+    await colecao_presencas.update_one(
+        {"_id": str(call_id)},
+        {"$set": {"usuarios": usuarios}},
+        upsert=True
+    )
+
+async def _remover_presencas_mongo(call_id):
+    """Remove as presenças de uma call do MongoDB (usado ao encerrar)."""
+    if not _usando_mongo_presencas():
+        return
+    await colecao_presencas.delete_one({"_id": str(call_id)})
+
+async def _carregar_presencas_mongo():
+    """Carrega todas as presenças ativas do MongoDB. Retorna {call_id: {user_id: {...}}}."""
+    if not _usando_mongo_presencas():
+        return {}
+    resultado = {}
+    async for doc in colecao_presencas.find():
+        call_id = doc["_id"]
+        presencas = {}
+        dados_u = doc.get("usuarios", {})
+        for uid, d in dados_u.items():
+            entrada = d.get("entrada")
+            if isinstance(entrada, str):
+                try:
+                    entrada = datetime.fromisoformat(entrada)
+                except (ValueError, TypeError):
+                    entrada = datetime.now(timezone.utc)
+            elif entrada is None:
+                entrada = datetime.now(timezone.utc)
+            if entrada.tzinfo is None:
+                entrada = entrada.replace(tzinfo=timezone.utc)
+            presencas[uid] = {
+                "entrada": entrada,
+                "minutos": d.get("minutos", 0),
+            }
+        if presencas:
+            resultado[call_id] = presencas
+    return resultado
 
 
 # ==========================================
@@ -568,7 +626,7 @@ class PainelVagas(discord.ui.View):
                 if canal:
                     for membro in canal.members:
                         if not membro.bot:
-                            lfg_cog.registrar_entrada_call(self.call_id, str(membro.id))
+                            await lfg_cog.registrar_entrada_call(self.call_id, str(membro.id))
 
         await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
 
@@ -1149,6 +1207,7 @@ class LFG(commands.Cog):
         self.eventos_ativos = eventos_validos(self.eventos_ativos)
         self.templates = await carregar_templates()
         self.paineis_ativos = {}
+        self.presenca_calls = await _carregar_presencas_mongo()
 
         guilda = self.bot.guilds[0] if self.bot.guilds else None
         eventos_para_remover = []
@@ -1221,15 +1280,16 @@ class LFG(commands.Cog):
         if task and not task.done():
             task.cancel()
 
-    def registrar_entrada_call(self, call_id, user_id):
+    async def registrar_entrada_call(self, call_id, user_id):
         if call_id not in self.presenca_calls:
             self.presenca_calls[call_id] = {}
         self.presenca_calls[call_id][user_id] = {
             "entrada": datetime.now(timezone.utc),
             "minutos": 0,
         }
+        await _salvar_presencas_mongo(call_id, self.presenca_calls[call_id])
 
-    def registrar_saida_call(self, call_id, user_id):
+    async def registrar_saida_call(self, call_id, user_id):
         dados = self.presenca_calls.get(call_id, {}).get(user_id)
         if not dados:
             return
@@ -1240,9 +1300,14 @@ class LFG(commands.Cog):
         minutos = int((agora - entrada).total_seconds() / 60)
         dados["minutos"] += minutos
         del self.presenca_calls[call_id][user_id]
+        if self.presenca_calls.get(call_id):
+            await _salvar_presencas_mongo(call_id, self.presenca_calls[call_id])
+        else:
+            await _remover_presencas_mongo(call_id)
 
     def calcular_pontos(self, call_id, painel):
         presencas = self.presenca_calls.pop(call_id, {})
+        asyncio.create_task(_remover_presencas_mongo(call_id))
         for user_id, dados in presencas.items():
             agora = datetime.now(timezone.utc)
             entrada = dados["entrada"]
@@ -1277,6 +1342,7 @@ class LFG(commands.Cog):
 
     async def _encerrar_conteudo(self, painel, guilda, jump_url=None):
         """Método centralizado de encerramento. Usado tanto pelo botão manual quanto pelo auto."""
+        print(f"🛑 _encerrar_conteudo chamado: conteudo={painel.conteudo}, call_id={painel.call_id}, jump_url={painel.jump_url}")
         painel._definir_status("encerrado")
 
         evento = None
@@ -1298,6 +1364,8 @@ class LFG(commands.Cog):
                           and e.get("autor_id") == painel.autor_id
                           and e.get("status", "formando") != "encerrado"), None)
 
+        print(f"🛑 Evento encontrado: {evento is not None} (status={evento.get('status') if evento else 'N/A'})")
+
         if evento:
             evento["status"] = "encerrado"
 
@@ -1306,17 +1374,24 @@ class LFG(commands.Cog):
 
         resultados = {}
         if painel.call_id:
+            print(f"🛑 Calculando pontos para call_id={painel.call_id}, presencas={self.presenca_calls.get(str(painel.call_id), self.presenca_calls.get(painel.call_id, {}))}")
             resultados = self.calcular_pontos(painel.call_id, painel)
+            print(f"🛑 Resultados: {resultados}")
             if resultados:
                 await salvar_pontos(resultados, painel.conteudo)
+                print(f"✅ Pontos salvos no MongoDB: {len(resultados)} usuarios")
 
         if painel.call_id and guilda:
-            canal = guilda.get_channel(painel.call_id)
-            if canal:
-                try:
-                    await canal.delete()
-                except Exception as e:
-                    print(f"⚠️ Erro ao deletar call {painel.call_id}: {e}")
+            try:
+                canal = await guilda.fetch_channel(painel.call_id)
+                await canal.delete()
+                print(f"✅ Call {painel.call_id} deletada com sucesso")
+            except discord.NotFound:
+                print(f"⚠️ Call {painel.call_id} já não existe (deletada por outro meio?)")
+            except discord.Forbidden:
+                print(f"❌ Sem permissão pra deletar call {painel.call_id}")
+            except Exception as e:
+                print(f"⚠️ Erro ao deletar call {painel.call_id}: {type(e).__name__}: {e}")
 
         self.timers_vazio.pop(painel.call_id, None)
         await salvar_eventos(self.eventos_ativos)

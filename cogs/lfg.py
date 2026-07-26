@@ -160,15 +160,14 @@ async def _carregar_presencas_mongo():
         dados_u = doc.get("usuarios", {})
         for uid, d in dados_u.items():
             entrada = d.get("entrada")
-            if isinstance(entrada, str):
-                try:
-                    entrada = datetime.fromisoformat(entrada)
-                except (ValueError, TypeError):
-                    entrada = datetime.now(timezone.utc)
-            elif entrada is None:
-                entrada = datetime.now(timezone.utc)
-            if entrada.tzinfo is None:
-                entrada = entrada.replace(tzinfo=timezone.utc)
+            if entrada is not None:
+                if isinstance(entrada, str):
+                    try:
+                        entrada = datetime.fromisoformat(entrada)
+                    except (ValueError, TypeError):
+                        entrada = datetime.now(timezone.utc)
+                if entrada.tzinfo is None:
+                    entrada = entrada.replace(tzinfo=timezone.utc)
             presencas[uid] = {
                 "entrada": entrada,
                 "minutos": d.get("minutos", 0),
@@ -1283,15 +1282,19 @@ class LFG(commands.Cog):
     async def registrar_entrada_call(self, call_id, user_id):
         if call_id not in self.presenca_calls:
             self.presenca_calls[call_id] = {}
-        self.presenca_calls[call_id][user_id] = {
-            "entrada": datetime.now(timezone.utc),
-            "minutos": 0,
-        }
+        dados_existentes = self.presenca_calls[call_id].get(user_id)
+        if dados_existentes:
+            dados_existentes["entrada"] = datetime.now(timezone.utc)
+        else:
+            self.presenca_calls[call_id][user_id] = {
+                "entrada": datetime.now(timezone.utc),
+                "minutos": 0,
+            }
         await _salvar_presencas_mongo(call_id, self.presenca_calls[call_id])
 
     async def registrar_saida_call(self, call_id, user_id):
         dados = self.presenca_calls.get(call_id, {}).get(user_id)
-        if not dados:
+        if not dados or dados["entrada"] is None:
             return
         agora = datetime.now(timezone.utc)
         entrada = dados["entrada"]
@@ -1299,21 +1302,19 @@ class LFG(commands.Cog):
             entrada = entrada.replace(tzinfo=timezone.utc)
         minutos = int((agora - entrada).total_seconds() / 60)
         dados["minutos"] += minutos
-        del self.presenca_calls[call_id][user_id]
-        if self.presenca_calls.get(call_id):
-            await _salvar_presencas_mongo(call_id, self.presenca_calls[call_id])
-        else:
-            await _remover_presencas_mongo(call_id)
+        dados["entrada"] = None
+        await _salvar_presencas_mongo(call_id, self.presenca_calls[call_id])
 
     def calcular_pontos(self, call_id, painel):
         presencas = self.presenca_calls.pop(call_id, {})
         asyncio.create_task(_remover_presencas_mongo(call_id))
         for user_id, dados in presencas.items():
-            agora = datetime.now(timezone.utc)
             entrada = dados["entrada"]
-            if entrada.tzinfo is None:
-                entrada = entrada.replace(tzinfo=timezone.utc)
-            dados["minutos"] += int((agora - entrada).total_seconds() / 60)
+            if entrada is not None:
+                agora = datetime.now(timezone.utc)
+                if entrada.tzinfo is None:
+                    entrada = entrada.replace(tzinfo=timezone.utc)
+                dados["minutos"] += int((agora - entrada).total_seconds() / 60)
 
         teto = painel.teto_pontos
         inscritos = set()

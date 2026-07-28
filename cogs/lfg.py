@@ -7,7 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
 
-from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_pontos, colecao_presencas
+from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_pontos, colecao_presencas, MINIMO_JOGADORES_PONTOS
 from cogs.economia import salvar_pontos
 
 
@@ -659,13 +659,19 @@ class PainelVagas(discord.ui.View):
 
         lfg_cog = interaction.client.get_cog("LFG")
         resultados = {}
+        participantes_reais = 0
         if lfg_cog:
-            resultados = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
+            resultados, participantes_reais = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
 
         await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
         await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
 
-        if resultados:
+        if self.call_id and not resultados:
+            await interaction.followup.send(
+                f"⚠️ Conteúdo encerrado sem pontuação — mínimo de {MINIMO_JOGADORES_PONTOS} "
+                f"jogadores não atingido (apenas {participantes_reais} participaram)."
+            )
+        elif resultados:
             linhas = []
             for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
                 linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
@@ -1325,6 +1331,7 @@ class LFG(commands.Cog):
                     inscritos.add(uid)
 
         resultados = {}
+        participantes_reais = 0
         todos_users = set(inscritos) | set(presencas.keys())
         for user_id in todos_users:
             if user_id not in inscritos:
@@ -1333,13 +1340,18 @@ class LFG(commands.Cog):
             minutos = dados.get("minutos", 0)
             if minutos <= 0:
                 continue
+            participantes_reais += 1
             pontos = (minutos // 30) * 10
             if pontos <= 0:
                 continue
             pontos = min(pontos, teto)
             resultados[user_id] = {"minutos": minutos, "pontos": pontos}
 
-        return resultados
+        if participantes_reais < MINIMO_JOGADORES_PONTOS:
+            print(f"⚠️ calcular_pontos: apenas {participantes_reais} participante(s) real(is) — mínimo {MINIMO_JOGADORES_PONTOS} não atingido, sem pontuação")
+            return {}, participantes_reais
+
+        return resultados, participantes_reais
 
     async def _encerrar_conteudo(self, painel, guilda, jump_url=None):
         """Método centralizado de encerramento. Usado tanto pelo botão manual quanto pelo auto."""
@@ -1374,10 +1386,11 @@ class LFG(commands.Cog):
             self._cancelar_timer_vazio(painel.call_id)
 
         resultados = {}
+        participantes_reais = 0
         if painel.call_id:
             print(f"🛑 Calculando pontos para call_id={painel.call_id}, presencas={self.presenca_calls.get(str(painel.call_id), self.presenca_calls.get(painel.call_id, {}))}")
-            resultados = self.calcular_pontos(painel.call_id, painel)
-            print(f"🛑 Resultados: {resultados}")
+            resultados, participantes_reais = self.calcular_pontos(painel.call_id, painel)
+            print(f"🛑 Resultados: {resultados} (participantes_reais={participantes_reais})")
             if resultados:
                 await salvar_pontos(resultados, painel.conteudo)
                 print(f"✅ Pontos salvos no MongoDB: {len(resultados)} usuarios")
@@ -1396,7 +1409,7 @@ class LFG(commands.Cog):
 
         self.timers_vazio.pop(painel.call_id, None)
         await salvar_eventos(self.eventos_ativos)
-        return resultados
+        return resultados, participantes_reais
 
     async def _auto_encerrar(self, call_id):
         print(f"🔁 _auto_encerrar iniciado para call_id={call_id} (tipo={type(call_id).__name__})")
@@ -1438,7 +1451,7 @@ class LFG(commands.Cog):
             return
 
         print(f"✅ _auto_encerrando: call_id={call_id}, painel.msg_id={msg_id}, conteudo={painel.conteudo}")
-        resultados = await self._encerrar_conteudo(painel, guilda)
+        resultados, participantes_reais = await self._encerrar_conteudo(painel, guilda)
 
         if msg_id:
             encontrou = False
@@ -1447,7 +1460,12 @@ class LFG(commands.Cog):
                     msg = await ch.fetch_message(msg_id)
                     await msg.edit(embed=painel.gerar_embed(), view=painel)
                     await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.")
-                    if resultados:
+                    if not resultados:
+                        await ch.send(
+                            f"⚠️ Conteúdo encerrado sem pontuação — mínimo de {MINIMO_JOGADORES_PONTOS} "
+                            f"jogadores não atingido (apenas {participantes_reais} participaram)."
+                        )
+                    else:
                         linhas = []
                         for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
                             linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")

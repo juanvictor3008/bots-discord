@@ -1441,10 +1441,11 @@ class LFG(commands.Cog):
         resultados = await self._encerrar_conteudo(painel, guilda)
 
         if msg_id:
+            encontrou = False
             for ch in guilda.text_channels:
                 try:
                     msg = await ch.fetch_message(msg_id)
-                    await msg.edit(embed=painel.gerar_embed())
+                    await msg.edit(embed=painel.gerar_embed(), view=painel)
                     await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.")
                     if resultados:
                         linhas = []
@@ -1457,9 +1458,12 @@ class LFG(commands.Cog):
                         )
                         embed_pts.set_footer(text=f"Teto: {painel.teto_pontos} pts ({painel.foods} foods)")
                         await ch.send(embed=embed_pts)
+                    encontrou = True
                     break
                 except Exception:
                     continue
+            if not encontrou:
+                print(f"⚠️ _auto_encerrar: mensagem {msg_id} não encontrada em nenhum canal de texto")
         autor = guilda.get_member(painel.autor_id)
         if autor:
             try:

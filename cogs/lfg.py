@@ -1565,7 +1565,6 @@ class LFG(commands.Cog):
                 await salvar_eventos(self.eventos_ativos)
 
                 if call_id:
-                    self._iniciar_timer_vazio(call_id)
                     try:
                         canal_msg = guilda.get_channel(int(jump_url.split("/")[-2]))
                         if canal_msg:
@@ -1602,6 +1601,18 @@ class LFG(commands.Cog):
                                                 pass
                     except Exception:
                         pass
+
+                    agora_ts = int(datetime.now(timezone.utc).timestamp())
+                    segundos_ate_hora = unix_timestamp - agora_ts
+                    if segundos_ate_hora > 0:
+                        print(f"⏰ Timer de call vazia para {conteudo} adiado para o horário agendado (daqui {segundos_ate_hora}s)")
+                        await asyncio.sleep(segundos_ate_hora)
+                        canal = guilda.get_channel(call_id)
+                        if canal and len(canal.members) == 0:
+                            print(f"⏰ Call {call_id} ainda vazia no horário agendado, iniciando timer de auto-encerramento")
+                            self._iniciar_timer_vazio(call_id)
+                    else:
+                        self._iniciar_timer_vazio(call_id)
                 break
 
     async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, foods=1):

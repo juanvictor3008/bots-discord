@@ -7,11 +7,12 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from config import (
-    CANAL_LIMPEZA_ID, CARGOS, GUILDA_ALBION_ID, ALIANCA_ALBION_ID,
+    CARGOS, GUILDA_ALBION_ID, ALIANCA_ALBION_ID,
     MONGO_URI, colecao_tempo_call,
     MINIMO_PESSOAS_CALL, PONTOS_POR_CICLO,
     MULTIPLICADOR_CALLER, MENSAGEM_CLASSES_ID, REACOES_CLASSES, CANAIS_GERADORES_IDS
 )
+from cogs.lfg import _eh_staff
 
 
 # Arquivo JSON para tempo de call (fallback local)
@@ -76,36 +77,10 @@ class Automacoes(commands.Cog):
     async def on_ready(self):
         if not self.auditoria_guilda.is_running():
             self.auditoria_guilda.start()
-        if not self.limpeza_automatica.is_running():
-            self.limpeza_automatica.start()
         if not self.farm_de_pontos.is_running():
             self.farm_de_pontos.start()
         if not self.atualizar_tempo_call.is_running():
             self.atualizar_tempo_call.start()
-
-    # ==========================================
-    # SISTEMA DE LIMPEZA AUTOMÁTICA
-    # ==========================================
-    @tasks.loop(minutes=30)
-    async def limpeza_automatica(self):
-        if CANAL_LIMPEZA_ID == 0:
-            return
-
-        canal = self.bot.get_channel(CANAL_LIMPEZA_ID)
-        if not canal:
-            return
-
-        limite_tempo = datetime.now(timezone.utc) - timedelta(hours=6)
-
-        def verificar_mensagem(msg):
-            return not msg.pinned
-
-        try:
-            deletadas = await canal.purge(limit=None, before=limite_tempo, check=verificar_mensagem)
-            if len(deletadas) > 0:
-                print(f"🧹 Faxina concluída! {len(deletadas)} mensagens apagadas no canal de limpeza.")
-        except Exception as e:
-            print(f"⚠️ Erro ao tentar limpar o chat: {e}")
 
     # ==========================================
     # SISTEMA DE AUDITORIA DE MEMBROS
@@ -460,6 +435,20 @@ class Automacoes(commands.Cog):
                             await lfg_cog.registrar_entrada_call(after.channel.id, id_str)
         except Exception as e:
             print(f"⚠️ Erro no timer de call vazia: {type(e).__name__}: {e}")
+
+    @commands.command(name="limpar")
+    async def limpar(self, ctx):
+        if not _eh_staff(ctx.author):
+            return await ctx.send("❌ Apenas staff pode usar esse comando.", delete_after=10)
+
+        def verificar_mensagem(msg):
+            return not msg.pinned
+
+        try:
+            deletadas = await ctx.channel.purge(limit=None, check=verificar_mensagem)
+            await ctx.send(f"🧹 Canal limpo! {len(deletadas)} mensagens apagadas.", delete_after=10)
+        except Exception as e:
+            await ctx.send(f"⚠️ Erro ao limpar o canal: {e}", delete_after=10)
 
 
 async def setup(bot):

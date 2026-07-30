@@ -657,13 +657,15 @@ class PainelVagas(discord.ui.View):
         if not _eh_lider_ou_staff(interaction.user, self.autor_id):
             return await interaction.response.send_message("❌ Acesso Negado: Apenas o líder da PT ou a Staff pode fazer o call out!", ephemeral=True)
 
+        await interaction.response.defer()
+
         lfg_cog = interaction.client.get_cog("LFG")
         resultados = {}
         participantes_reais = 0
         if lfg_cog:
             resultados, participantes_reais = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
 
-        await interaction.response.edit_message(embed=self.gerar_embed(), view=self)
+        await interaction.edit_original_response(embed=self.gerar_embed(), view=self)
         await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
 
         if self.call_id and not resultados:

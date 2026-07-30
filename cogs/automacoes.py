@@ -416,14 +416,14 @@ class Automacoes(commands.Cog):
                 call_ids_ativos = set()
                 for evento in lfg_cog.eventos_ativos:
                     cid = evento.get("call_id")
-                    if cid and evento.get("status", "formando") != "encerrado":
+                    if cid and evento.get("status", "formando") not in ("encerrado", "encerrando"):
                         call_ids_ativos.add(cid)
 
                 print(f"📋 Call IDs ativos: {call_ids_ativos}")
 
                 def _painel_do_call(cid):
                     for p in lfg_cog.paineis_ativos.values():
-                        if p.call_id == cid and p.status != "encerrado":
+                        if p.call_id == cid and p.status not in ("encerrado", "encerrando"):
                             return p
                     return None
 

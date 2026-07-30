@@ -119,7 +119,7 @@ def eventos_validos(eventos):
     return [
         e for e in eventos
         if (e.get("unix_timestamp") is None or e.get("unix_timestamp", 0) > agora_ts - 3600)
-        and e.get("status", "formando") != "encerrado"
+        and e.get("status", "formando") not in ("encerrado", "encerrando")
     ]
 
 
@@ -1220,7 +1220,7 @@ class LFG(commands.Cog):
         eventos_para_remover = []
 
         for evento in self.eventos_ativos:
-            if evento.get("status") == "encerrado":
+            if evento.get("status", "formando") in ("encerrado", "encerrando"):
                 continue
 
             if evento.get("status") == "formando" and evento.get("unix_timestamp"):
@@ -1358,31 +1358,48 @@ class LFG(commands.Cog):
     async def _encerrar_conteudo(self, painel, guilda, jump_url=None):
         """Método centralizado de encerramento. Usado tanto pelo botão manual quanto pelo auto."""
         print(f"🛑 _encerrar_conteudo chamado: conteudo={painel.conteudo}, call_id={painel.call_id}, jump_url={painel.jump_url}")
-        painel._definir_status("encerrado")
 
         evento = None
         if painel.jump_url:
             evento = next((e for e in self.eventos_ativos
                           if e.get("jump_url") == painel.jump_url
-                          and e.get("status", "formando") != "encerrado"), None)
+                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
         if not evento and painel.call_id:
             evento = next((e for e in self.eventos_ativos
                           if e.get("call_id") == painel.call_id
-                          and e.get("status", "formando") != "encerrado"), None)
+                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
         if not evento and jump_url:
             evento = next((e for e in self.eventos_ativos
                           if e.get("jump_url") == jump_url
-                          and e.get("status", "formando") != "encerrado"), None)
+                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
         if not evento:
             evento = next((e for e in self.eventos_ativos
                           if e.get("conteudo") == painel.conteudo
                           and e.get("autor_id") == painel.autor_id
-                          and e.get("status", "formando") != "encerrado"), None)
-
-        print(f"🛑 Evento encontrado: {evento is not None} (status={evento.get('status') if evento else 'N/A'})")
+                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
 
         if evento:
-            evento["status"] = "encerrado"
+            if evento.get("status") in ("encerrando", "encerrado"):
+                print(f"⚠️ _encerrar_conteudo: evento já em estado terminal ({evento['status']}), ignorando chamada duplicada")
+                return {}, 0
+
+            if _usando_mongo():
+                filtro = {}
+                if evento.get("jump_url"):
+                    filtro["jump_url"] = evento["jump_url"]
+                elif evento.get("call_id"):
+                    filtro["call_id"] = evento["call_id"]
+                if filtro:
+                    filtro["status"] = {"$nin": ["encerrando", "encerrado"]}
+                    resultado = await colecao_eventos.find_one_and_update(filtro, {"$set": {"status": "encerrando"}})
+                    if resultado is None:
+                        print(f"⚠️ _encerrar_conteudo: encerramento já em andamento ou concluído no Mongo, ignorando")
+                        return {}, 0
+
+            evento["status"] = "encerrando"
+
+        print(f"🛑 Evento encontrado: {evento is not None} (status={evento.get('status') if evento else 'N/A'})")
+        painel._definir_status("encerrado")
 
         if painel.call_id:
             self._cancelar_timer_vazio(painel.call_id)
@@ -1410,6 +1427,8 @@ class LFG(commands.Cog):
                 print(f"⚠️ Erro ao deletar call {painel.call_id}: {type(e).__name__}: {e}")
 
         self.timers_vazio.pop(painel.call_id, None)
+        if evento:
+            evento["status"] = "encerrado"
         await salvar_eventos(self.eventos_ativos)
         return resultados, participantes_reais
 
@@ -1418,7 +1437,7 @@ class LFG(commands.Cog):
         await asyncio.sleep(self.TEMPO_TOLERANCIA_VAZIA)
         print(f"🔁 Timer expirou para call_id={call_id}. Verificando estado...")
 
-        evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and e.get("status", "formando") != "encerrado"), None)
+        evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
         if not evento:
             print(f"⚠️ _auto_encerrar: evento não encontrado para call_id={call_id}. call_ids_ativos={[e.get('call_id') for e in self.eventos_ativos]}")
             self.timers_vazio.pop(call_id, None)
@@ -1443,7 +1462,7 @@ class LFG(commands.Cog):
         painel = None
         msg_id = None
         for mid, p in self.paineis_ativos.items():
-            if p.call_id == call_id and p.status != "encerrado":
+            if p.call_id == call_id and p.status not in ("encerrado", "encerrando"):
                 painel = p
                 msg_id = mid
                 break
@@ -1575,7 +1594,7 @@ class LFG(commands.Cog):
         await asyncio.sleep(segundos_ate)
 
         for evento in self.eventos_ativos:
-            if evento.get("jump_url") == jump_url and evento.get("status") != "encerrado":
+            if evento.get("jump_url") == jump_url and evento.get("status") not in ("encerrado", "encerrando"):
                 autor = guilda.get_member(autor_id)
                 if not autor:
                     return

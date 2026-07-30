@@ -666,7 +666,7 @@ class PainelVagas(discord.ui.View):
             resultados, participantes_reais = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
 
         await interaction.edit_original_response(embed=self.gerar_embed(), view=self)
-        await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!")
+        await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!", delete_after=30)
 
         if self.call_id and not resultados:
             await interaction.followup.send(
@@ -1461,7 +1461,7 @@ class LFG(commands.Cog):
                 try:
                     msg = await ch.fetch_message(msg_id)
                     await msg.edit(embed=painel.gerar_embed(), view=painel)
-                    await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.")
+                    await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.", delete_after=30)
                     if not resultados:
                         await ch.send(
                             f"⚠️ Conteúdo encerrado sem pontuação — mínimo de {MINIMO_JOGADORES_PONTOS} "

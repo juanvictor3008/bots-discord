@@ -1,11 +1,18 @@
 import discord
 from datetime import datetime, timezone
 from discord.ext import commands
-from config import MONGO_URI, colecao_pontos
+from config import MONGO_URI, colecao_pontos, CARGOS
 
 
 def _usando_mongo():
     return MONGO_URI is not None and colecao_pontos is not None
+
+
+def _eh_lider_ou_sublider(usuario):
+    if usuario.guild_permissions.administrator:
+        return True
+    ids = [CARGOS.get(n) for n in ["lider", "SUB-LIDER"] if CARGOS.get(n)]
+    return any(c.id in ids for c in usuario.roles)
 
 
 async def salvar_pontos(resultados, conteudo):
@@ -100,11 +107,45 @@ class Economia(commands.Cog):
 
     @commands.command(name="adicionarpontos")
     async def adicionar_pontos_manual(self, ctx, membro: discord.Member, quantidade: int):
-        await ctx.send("⚠️ Sistema de pontos desativado no momento.")
+        if not _eh_lider_ou_sublider(ctx.author):
+            return await ctx.send("❌ Apenas líder ou sub-líder pode usar esse comando.")
+        if quantidade <= 0:
+            return await ctx.send("❌ Quantidade precisa ser positiva.")
+        if not _usando_mongo():
+            return await ctx.send("❌ Sistema de pontos requer MongoDB.")
+        await colecao_pontos.update_one(
+            {"_id": str(membro.id)},
+            {"$inc": {"total": quantidade},
+             "$push": {"historico": {"$each": [{
+                 "conteudo": f"Ajuste manual por {ctx.author.display_name}",
+                 "minutos": 0,
+                 "pontos": quantidade,
+                 "data": datetime.now(timezone.utc).replace(tzinfo=None),
+             }], "$slice": -100}}},
+            upsert=True
+        )
+        await ctx.send(f"✅ {quantidade} pontos adicionados pra {membro.mention}.")
 
     @commands.command(name="removerpontos")
     async def remover_pontos_manual(self, ctx, membro: discord.Member, quantidade: int):
-        await ctx.send("⚠️ Sistema de pontos desativado no momento.")
+        if not _eh_lider_ou_sublider(ctx.author):
+            return await ctx.send("❌ Apenas líder ou sub-líder pode usar esse comando.")
+        if quantidade <= 0:
+            return await ctx.send("❌ Quantidade precisa ser positiva.")
+        if not _usando_mongo():
+            return await ctx.send("❌ Sistema de pontos requer MongoDB.")
+        await colecao_pontos.update_one(
+            {"_id": str(membro.id)},
+            {"$inc": {"total": -quantidade},
+             "$push": {"historico": {"$each": [{
+                 "conteudo": f"Ajuste manual por {ctx.author.display_name}",
+                 "minutos": 0,
+                 "pontos": -quantidade,
+                 "data": datetime.now(timezone.utc).replace(tzinfo=None),
+             }], "$slice": -100}}},
+            upsert=True
+        )
+        await ctx.send(f"✅ {quantidade} pontos removidos de {membro.mention}.")
 
     @commands.command(name="relatorio")
     async def gerar_relatorio_pontos(self, ctx):

@@ -670,6 +670,7 @@ class PainelVagas(discord.ui.View):
             resultados, participantes_reais = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
 
         await interaction.edit_original_response(embed=self.gerar_embed(), view=self)
+        asyncio.create_task(_deletar_painel_apos_delay(interaction.message, 300))
         await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!", delete_after=30)
 
         if self.call_id and not resultados:
@@ -1233,6 +1234,15 @@ def _lider_de_outra_pt_imediata(eventos, autor_id, ignore_msg_id=None):
             return True
     return False
 
+async def _deletar_painel_apos_delay(mensagem, delay_segundos):
+    await asyncio.sleep(delay_segundos)
+    try:
+        await mensagem.delete()
+    except discord.NotFound:
+        pass
+    except Exception as e:
+        print(f"⚠️ Erro ao deletar painel após delay: {type(e).__name__}: {e}")
+
 class LFG(commands.Cog):
     TEMPO_TOLERANCIA_VAZIA = 300  # 5 minutos
 
@@ -1517,6 +1527,7 @@ class LFG(commands.Cog):
                 try:
                     msg = await ch.fetch_message(msg_id)
                     await msg.edit(embed=painel.gerar_embed(), view=painel)
+                    asyncio.create_task(_deletar_painel_apos_delay(msg, 300))
                     await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.", delete_after=30)
                     if not resultados:
                         await ch.send(

@@ -1783,17 +1783,15 @@ class LFG(commands.Cog):
         self.eventos_ativos = eventos_validos(self.eventos_ativos)
         await salvar_eventos(self.eventos_ativos)
 
-        if not self.eventos_ativos:
-            return await ctx.send("📭 Nenhum Ping agendada no momento. Crie um com `/content`.", delete_after=30)
+        eventos_agendados = [e for e in self.eventos_ativos if e.get("unix_timestamp")]
+        if not eventos_agendados:
+            return await ctx.send("📭 Nenhum conteúdo agendado no momento. Crie um com `/content`.", delete_after=30)
 
-        eventos_ordenados = sorted(
-            self.eventos_ativos,
-            key=lambda e: (e.get("unix_timestamp") is None, e.get("unix_timestamp") or 0)
-        )
+        eventos_ordenados = sorted(eventos_agendados, key=lambda e: e["unix_timestamp"])
 
         embed = discord.Embed(
             title="📅 Agenda de Pings — Die Hard",
-            description="Confira abaixo todos os pings agendadas no servidor:",
+            description="Confira abaixo todos os pings agendados no servidor:",
             color=discord.Color.gold()
         )
 
@@ -1802,17 +1800,11 @@ class LFG(commands.Cog):
             if status_evt == "em_andamento":
                 indicador = "🔵"
                 texto_status = "Em andamento"
-            elif evento.get("unix_timestamp"):
+            else:
                 indicador = "🟡"
                 texto_status = "Agendado"
-            else:
-                indicador = "🟢"
-                texto_status = "Formando"
 
-            if evento.get("unix_timestamp"):
-                quando = f"<t:{evento['unix_timestamp']}:R> — <t:{evento['unix_timestamp']}:f>"
-            else:
-                quando = "Sem horário definido (imediata)"
+            quando = f"<t:{evento['unix_timestamp']}:R> — <t:{evento['unix_timestamp']}:f>"
 
             embed.add_field(
                 name=f"{indicador} {evento['conteudo']}",

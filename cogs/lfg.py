@@ -1814,6 +1814,44 @@ class LFG(commands.Cog):
 
         await ctx.send(embed=embed)
 
+    @commands.command(name="eventospendentes")
+    async def eventos_pendentes(self, ctx):
+        if not _eh_staff(ctx.author):
+            return await ctx.send("❌ Apenas staff pode usar esse comando.")
+        ativos = [e for e in self.eventos_ativos if e.get("status", "formando") not in ("encerrado", "encerrando")]
+        if not ativos:
+            return await ctx.send("✅ Nenhum conteúdo pendente.")
+        linhas = []
+        for i, e in enumerate(ativos):
+            linhas.append(f"`{i}` — {e.get('conteudo')} | status: {e.get('status')} | call_id: {e.get('call_id')} | líder: <@{e.get('autor_id')}>")
+        await ctx.send("\n".join(linhas))
+
+    @commands.command(name="encerrarforcado")
+    async def encerrar_forcado(self, ctx, indice: int):
+        if not _eh_staff(ctx.author):
+            return await ctx.send("❌ Apenas staff pode usar esse comando.")
+        ativos = [e for e in self.eventos_ativos if e.get("status", "formando") not in ("encerrado", "encerrando")]
+        if indice < 0 or indice >= len(ativos):
+            return await ctx.send("❌ Índice inválido. Confira com `!eventospendentes`.")
+
+        evento = ativos[indice]
+        call_id = evento.get("call_id")
+
+        if call_id:
+            try:
+                canal = await ctx.guild.fetch_channel(call_id)
+                await canal.delete()
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                await ctx.send(f"⚠️ Não consegui deletar a call: {e}")
+            self.timers_vazio.pop(call_id, None)
+            self.presenca_calls.pop(call_id, None)
+
+        evento["status"] = "encerrado"
+        await salvar_eventos(self.eventos_ativos)
+        await ctx.send(f"✅ Conteúdo **{evento.get('conteudo')}** encerrado forçadamente (sem cálculo de pontos, painel original indisponível).")
+
 
 # Função para inicializar e plugar essa engrenagem no main.py
 async def setup(bot):

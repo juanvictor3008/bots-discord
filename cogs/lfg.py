@@ -542,6 +542,10 @@ class PainelVagas(discord.ui.View):
         if self.status == "encerrado":
             return await interaction.response.send_message("❌ Esta PT já foi encerrada.", ephemeral=True)
 
+        lfg_cog = interaction.client.get_cog("LFG")
+        if lfg_cog and self.unix_timestamp is None and _membro_em_outra_pt_imediata(lfg_cog.eventos_ativos, interaction.user.id, self.message_id):
+            return await interaction.response.send_message("❌ Você já está inscrito em outra PT imediata ativa. Saia dela primeiro pra entrar nesta.", ephemeral=True)
+
         usuario = interaction.user.mention
         classe_antiga = None
 
@@ -1196,6 +1200,39 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
 # CLASSE COG (COMANDOS)
 # ==========================================
 
+def _membro_em_outra_pt_imediata(eventos, membro_id, ignore_msg_id=None):
+    """True se o membro já está inscrito em outra PT imediata ativa (sem agendamento)."""
+    mention = f"<@{membro_id}>"
+    for evt in eventos:
+        if evt.get("status") in ("encerrado", "encerrando"):
+            continue
+        if evt.get("unix_timestamp") is not None:
+            continue
+        evt_id = str(evt.get("message_id") or evt.get("jump_url") or "")
+        if ignore_msg_id and evt_id == str(ignore_msg_id):
+            continue
+        for lista in evt.get("jogadores", {}).values():
+            if mention in lista:
+                return True
+        for lista in evt.get("fila_espera", {}).values():
+            if mention in lista:
+                return True
+    return False
+
+def _lider_de_outra_pt_imediata(eventos, autor_id, ignore_msg_id=None):
+    """True se o autor já lidera outra PT imediata ativa (sem agendamento)."""
+    for evt in eventos:
+        if evt.get("status") in ("encerrado", "encerrando"):
+            continue
+        if evt.get("unix_timestamp") is not None:
+            continue
+        if str(evt.get("autor_id")) == str(autor_id):
+            evt_id = str(evt.get("message_id") or evt.get("jump_url") or "")
+            if ignore_msg_id and evt_id == str(ignore_msg_id):
+                continue
+            return True
+    return False
+
 class LFG(commands.Cog):
     TEMPO_TOLERANCIA_VAZIA = 300  # 5 minutos
 
@@ -1657,6 +1694,12 @@ class LFG(commands.Cog):
     async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, foods=1):
         """Cria e posta o painel de vagas — usado tanto pelo fluxo 'do zero' quanto por template."""
         unix_timestamp = interpretar_horario(horario_input) if horario_input else None
+
+        if unix_timestamp is None and _lider_de_outra_pt_imediata(self.eventos_ativos, interaction.user.id):
+            return await interaction.response.send_message(
+                "❌ Você já está liderando outra PT imediata ativa. Encerre ela antes de criar uma nova.",
+                ephemeral=True
+            )
 
         call_id = None
         if unix_timestamp:

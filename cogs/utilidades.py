@@ -1,21 +1,11 @@
 import discord
 from discord.ext import commands
-import aiohttp
-import asyncio
 
-from config import GUILDA_ALBION_ID, ALIANCA_ALBION_ID, TAG_GUILDA, TAG_ALIANCA, CARGOS, CARGOS_PERMITIDOS_ADICIONAR
+from config import CARGOS, CARGOS_PERMITIDOS_ADICIONAR
 
 class Utilidades(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # Cria UMA ÚNICA sessão para o bot inteiro usar (Muito mais rápido)
-        self.session = aiohttp.ClientSession()
-        # Semáforo: Permite no máximo 5 pesquisas no Albion ao mesmo tempo (evita crash)
-        self.semaforo = asyncio.Semaphore(5)
-
-    # Quando a Cog for desligada/recarregada, ele fecha a sessão com segurança
-    async def cog_unload(self):
-        await self.session.close()
 
     @commands.command(name="ajuda", aliases=["help", "comandos"])
     async def ajuda(self, ctx):

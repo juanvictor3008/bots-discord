@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_pontos, colecao_presencas, MINIMO_JOGADORES_PONTOS
 from cogs.economia import salvar_pontos
+from utils import log_discord
 
 
 FUSO = timezone(timedelta(hours=-3))
@@ -1322,6 +1323,14 @@ class LFG(commands.Cog):
             if evt in self.eventos_ativos:
                 self.eventos_ativos.remove(evt)
 
+        reconstruidos = len(self.paineis_ativos)
+        removidos = len(eventos_para_remover)
+        print(f"📊 on_ready: {reconstruidos} painéis reconstruídos, {removidos} eventos órfãos removidos")
+        if removidos > 0:
+            await log_discord(self.bot, f"**on_ready**: {reconstruidos} painéis reconstruídos, {removidos} eventos órfãos removidos (call não encontrada pós-restart)", "aviso")
+        else:
+            await log_discord(self.bot, f"**on_ready**: {reconstruidos} painéis reconstruídos, nenhum órfão.", "info")
+
         await salvar_eventos(self.eventos_ativos)
 
     def _iniciar_timer_vazio(self, call_id):
@@ -1398,6 +1407,7 @@ class LFG(commands.Cog):
 
         if participantes_reais < MINIMO_JOGADORES_PONTOS:
             print(f"⚠️ calcular_pontos: apenas {participantes_reais} participante(s) real(is) — mínimo {MINIMO_JOGADORES_PONTOS} não atingido, sem pontuação")
+            asyncio.create_task(log_discord(self.bot, f"**{painel.conteudo}** encerrado sem pontuação — apenas {participantes_reais} participante(s) (mín: {MINIMO_JOGADORES_PONTOS})", "aviso"))
             return {}, participantes_reais
 
         return resultados, participantes_reais
@@ -1445,6 +1455,8 @@ class LFG(commands.Cog):
 
             evento["status"] = "encerrando"
 
+        if not evento:
+            await log_discord(self.bot, f"Encerramento de **{painel.conteudo}** (call {painel.call_id}) não encontrou evento correspondente em `eventos_ativos`.", "aviso")
         print(f"🛑 Evento encontrado: {evento is not None} (status={evento.get('status') if evento else 'N/A'})")
         painel._definir_status("encerrado")
 
@@ -1460,6 +1472,7 @@ class LFG(commands.Cog):
             if resultados:
                 await salvar_pontos(resultados, painel.conteudo)
                 print(f"✅ Pontos salvos no MongoDB: {len(resultados)} usuarios")
+                await log_discord(self.bot, f"**{painel.conteudo}** encerrado — {len(resultados)} jogadores pontuados ({participantes_reais} participantes reais)", "info")
 
         if painel.call_id and guilda:
             try:
@@ -1470,8 +1483,10 @@ class LFG(commands.Cog):
                 print(f"⚠️ Call {painel.call_id} já não existe (deletada por outro meio?)")
             except discord.Forbidden:
                 print(f"❌ Sem permissão pra deletar call {painel.call_id}")
+                await log_discord(self.bot, f"Sem permissão pra deletar call {painel.call_id} do conteúdo **{painel.conteudo}**", "erro")
             except Exception as e:
                 print(f"⚠️ Erro ao deletar call {painel.call_id}: {type(e).__name__}: {e}")
+                await log_discord(self.bot, f"Erro ao deletar call {painel.call_id} de **{painel.conteudo}**: {type(e).__name__}: {e}", "erro")
 
         self.timers_vazio.pop(painel.call_id, None)
         if evento:
@@ -1519,6 +1534,7 @@ class LFG(commands.Cog):
             return
 
         print(f"✅ _auto_encerrando: call_id={call_id}, painel.msg_id={msg_id}, conteudo={painel.conteudo}")
+        await log_discord(self.bot, f"Auto-encerramento do conteúdo **{painel.conteudo}** (call {call_id} vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min)", "info")
         resultados, participantes_reais = await self._encerrar_conteudo(painel, guilda)
 
         if msg_id:
@@ -1551,6 +1567,7 @@ class LFG(commands.Cog):
                     continue
             if not encontrou:
                 print(f"⚠️ _auto_encerrar: mensagem {msg_id} não encontrada em nenhum canal de texto")
+                await log_discord(self.bot, f"Mensagem do painel **{painel.conteudo}** (id {msg_id}) não encontrada em nenhum canal de texto durante auto-encerramento", "aviso")
         autor = guilda.get_member(painel.autor_id)
         if autor:
             try:

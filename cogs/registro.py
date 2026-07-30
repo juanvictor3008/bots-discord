@@ -74,12 +74,15 @@ class RegistrarCog(commands.Cog):
         # ——— É DA DIE HARD ———
         if guild_id == GUILDA_ALBION_ID:
             cargo = guild.get_role(CARGOS.get("DIE HARD"))
+            cargo_recem_chegado = guild.get_role(CARGOS.get("recém chegado"))
             novo_nick = f'[DH] {nome_real}'
 
             try:
                 await membro.edit(nick=novo_nick[:32])
                 if cargo:
                     await membro.add_roles(cargo)
+                if cargo_recem_chegado and cargo_recem_chegado in membro.roles:
+                    await membro.remove_roles(cargo_recem_chegado)
                 await msg_status.edit(
                     content=f'✅ **{nome_real}** registrado como membro da **Die Hard**!\n'
                             f'👤 Apelido alterado para `{novo_nick}`\n'

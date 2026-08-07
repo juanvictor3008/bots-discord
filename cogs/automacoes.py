@@ -17,6 +17,27 @@ from cogs.lfg import _eh_staff
 from utils import log_discord
 
 
+async def _buscar_roster():
+    """Busca a lista de membros da guilda com retry. Retorna set de nomes (lower) ou None se falhar."""
+    for tentativa in range(3):
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"https://gameinfo.albiononline.com/api/gameinfo/guilds/{GUILDA_ALBION_ID}/members",
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status != 200:
+                        print(f"⚠️ Roster: status {resp.status} (tentativa {tentativa + 1}/3)")
+                        await asyncio.sleep(5 * (tentativa + 1))
+                        continue
+                    dados = await resp.json()
+                    return {m.get("Name", "").lower() for m in dados if m.get("Name")}
+        except Exception as e:
+            print(f"⚠️ Roster: erro {type(e).__name__}: {e} (tentativa {tentativa + 1}/3)")
+            await asyncio.sleep(5 * (tentativa + 1))
+    return None
+
+
 # Arquivo JSON para tempo de call (fallback local)
 ARQUIVO_TEMPO = "data/tempo_call.json"
 
@@ -124,19 +145,11 @@ class Automacoes(commands.Cog):
                 guilda_discord = g
                 break
 
-        roster_nomes = set()
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/guilds/{GUILDA_ALBION_ID}/members") as resp:
-                    if resp.status != 200:
-                        await log_discord(self.bot, f"❌ **Auditoria:** API de membros da guilda retornou status {resp.status} — auditoria abortada.", "erro")
-                        return
-                    dados = await resp.json()
-                    roster_nomes = {m.get("Name", "").lower() for m in dados if m.get("Name")}
-                    print(f"📊 Roster da guilda: {len(roster_nomes)} jogadores.")
-        except Exception as e:
-            await log_discord(self.bot, f"❌ **Auditoria:** erro ao buscar roster da guilda: {type(e).__name__}: {e}", "erro")
+        roster_nomes = await _buscar_roster()
+        if roster_nomes is None:
+            await log_discord(self.bot, "❌ **Auditoria:** falha ao buscar roster da guilda após 3 tentativas — auditoria abortada.", "erro")
             return
+        print(f"📊 Roster da guilda: {len(roster_nomes)} jogadores.")
 
         demovidos = []
         falhas = []
@@ -602,18 +615,10 @@ class Automacoes(commands.Cog):
 
         msg = await ctx.send("\n".join(linhas) + "\n\n⏳ Consultando roster da guilda...")
 
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/guilds/{GUILDA_ALBION_ID}/members") as resp:
-                    if resp.status != 200:
-                        await msg.edit(content="\n".join(linhas) + f"\n❌ API retornou status {resp.status}")
-                        return
-                    dados = await resp.json()
-        except Exception as e:
-            await msg.edit(content="\n".join(linhas) + f"\n❌ Erro na API: `{type(e).__name__}: {e}`")
+        roster_nomes = await _buscar_roster()
+        if roster_nomes is None:
+            await msg.edit(content="\n".join(linhas) + "\n❌ Falha ao buscar roster da guilda após 3 tentativas.")
             return
-
-        roster_nomes = {m.get("Name", "").lower() for m in dados if m.get("Name")}
 
         if nick.lower() in roster_nomes:
             linhas.append(f"✅ `{nick}` está no roster da guilda ({len(roster_nomes)} jogadores) — nada a fazer.")

@@ -501,6 +501,82 @@ class Automacoes(commands.Cog):
             return
         await msg.edit(content="✅ Auditoria concluída! Confira o relatório no canal de logs.")
 
+    @commands.command(name="conferir")
+    async def conferir(self, ctx, membro: discord.Member):
+        if not _eh_staff(ctx.author):
+            return await ctx.send("❌ Apenas staff pode usar esse comando.", delete_after=10)
+
+        guild = ctx.guild
+
+        nomes_imunes = ["lider", "recrutador", "moderador", "caller", "SUB-LIDER"]
+        ids_imunes = [CARGOS.get(nome) for nome in nomes_imunes if CARGOS.get(nome)]
+        tem_imune = [c.name for c in membro.roles if c.id in ids_imunes]
+
+        cargos_gerenciados = []
+        for id_cargo in CARGOS.values():
+            cargo = guild.get_role(id_cargo)
+            if cargo:
+                cargos_gerenciados.append(cargo)
+
+        cargos_do_membro = [c for c in cargos_gerenciados if c in membro.roles]
+        tem_cargo_die_hard = any(c.id == CARGOS.get("DIE HARD") for c in membro.roles)
+
+        linhas = [
+            f"👤 {membro.mention} (`{membro.display_name}`)",
+            f"🎭 Cargos gerenciados: {', '.join(c.name for c in cargos_do_membro) or 'nenhum'}",
+            f"🛡️ Tem DIE HARD: {'sim' if tem_cargo_die_hard else 'não'}",
+            f"🚫 Cargos imunes: {', '.join(tem_imune) or 'nenhum'}",
+        ]
+
+        if tem_imune:
+            linhas.append("❌ Membro é imune — a auditoria pula ele.")
+            return await ctx.send("\n".join(linhas))
+
+        if not cargos_do_membro:
+            linhas.append("❌ Sem cargo gerenciado — a auditoria pula ele.")
+            return await ctx.send("\n".join(linhas))
+
+        nick = membro.display_name
+        if " " in nick:
+            nick = nick.split(" ", 1)[1]
+        linhas.append(f"🔍 Nick extraído: `{nick}`")
+
+        msg = await ctx.send("\n".join(linhas) + "\n\n⏳ Consultando API...")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/search?q={nick}") as resp:
+                    if resp.status != 200:
+                        await msg.edit(content="\n".join(linhas) + f"\n❌ API retornou status {resp.status}")
+                        return
+                    dados = await resp.json()
+        except Exception as e:
+            await msg.edit(content="\n".join(linhas) + f"\n❌ Erro na API: `{type(e).__name__}: {e}`")
+            return
+
+        jogadores = dados.get('players', [])
+        jogador_encontrado = next((p for p in jogadores if p['Name'].lower() == nick.lower()), None)
+
+        if not jogador_encontrado:
+            linhas.append("⚠️ Jogador não encontrado na API — seria rebaixado (nada foi removido no debug).")
+            return await msg.edit(content="\n".join(linhas))
+
+        guild_id_jogador = jogador_encontrado.get('GuildId')
+        guild_name = jogador_encontrado.get('GuildName')
+        alliance_id_jogador = jogador_encontrado.get('AllianceId')
+
+        if tem_cargo_die_hard:
+            na_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
+            linhas.append(f"🏰 Guilda atual: **{guild_name or 'sem guilda'}**")
+            linhas.append(f"🎯 É DIE HARD → exige estar na Die Hard: {'✅ está na guilda' if na_guilda else '❌ NÃO está → seria rebaixado (nada removido no debug)'}")
+        else:
+            is_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
+            is_alianca = (ALIANCA_ALBION_ID and alliance_id_jogador == ALIANCA_ALBION_ID)
+            linhas.append(f"🏰 Guilda atual: **{guild_name or 'sem guilda'}**")
+            linhas.append(f"🎯 Sem DIE HARD → exige guilda OU aliança: {'✅ ok' if (is_guilda or is_alianca) else '❌ seria rebaixado (nada removido no debug)'}")
+
+        await msg.edit(content="\n".join(linhas))
+
 
 async def setup(bot):
     await bot.add_cog(Automacoes(bot))

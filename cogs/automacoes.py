@@ -158,8 +158,21 @@ class Automacoes(commands.Cog):
                 demovidos.append(membro)
                 print(f"⚠️ {membro.display_name} foi rebaixado.")
 
+                ganhou_recem_chegado = False
+                if not any(c.id in CARGOS.values() for c in membro.roles):
+                    cargo_recem = guilda_discord.get_role(CARGOS.get("recém chegado"))
+                    if cargo_recem:
+                        try:
+                            await membro.add_roles(cargo_recem)
+                            ganhou_recem_chegado = True
+                        except discord.Forbidden:
+                            await log_discord(self.bot, f"⚠️ **Auditoria:** não consegui dar o cargo recém chegado pra **{membro.display_name}** (hierarquia).", "aviso")
+
                 try:
-                    await membro.send("⚠️ **Aviso Automático:** Seu cargo de **Die Hard** foi removido porque nosso sistema detectou que você não está mais na guilda no jogo. Se isso for um erro, use o comando `!registrar` novamente!")
+                    aviso = "⚠️ **Aviso Automático:** Seu cargo de **Die Hard** foi removido porque nosso sistema detectou que você não está mais na guilda no jogo. Se isso for um erro, use o comando `!registrar` novamente!"
+                    if ganhou_recem_chegado:
+                        aviso += "\n🆕 Você recebeu o cargo **recém chegado** enquanto não estiver registrado na guilda."
+                    await membro.send(aviso)
                 except discord.Forbidden:
                     pass
             except discord.Forbidden:

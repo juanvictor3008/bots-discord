@@ -158,6 +158,19 @@ class Automacoes(commands.Cog):
                 demovidos.append(membro)
                 print(f"⚠️ {membro.display_name} foi rebaixado.")
 
+                # Remove a tag [DH] do apelido
+                nick_atual = membro.display_name
+                novo_nick = None
+                if nick_atual.lower().startswith("[dh] "):
+                    novo_nick = nick_atual[5:]
+                elif nick_atual.lower() == "[dh]":
+                    novo_nick = nick_atual
+                if novo_nick is not None and novo_nick.strip():
+                    try:
+                        await membro.edit(nick=novo_nick[:32])
+                    except discord.Forbidden:
+                        await log_discord(self.bot, f"⚠️ **Auditoria:** não consegui remover a tag `[DH]` do apelido de **{membro.display_name}** (hierarquia).", "aviso")
+
                 ganhou_recem_chegado = False
                 if not any(c.id in CARGOS.values() for c in membro.roles):
                     cargo_recem = guilda_discord.get_role(CARGOS.get("recém chegado"))

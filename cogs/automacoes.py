@@ -104,9 +104,11 @@ class Automacoes(commands.Cog):
 
         guilda_discord = self.bot.guilds[0]
         id_cargo_dh = CARGOS.get("DIE HARD")
+        cargo_dh = None
 
         for g in self.bot.guilds:
-            if g.get_role(id_cargo_dh):
+            cargo_dh = g.get_role(id_cargo_dh)
+            if cargo_dh:
                 guilda_discord = g
                 break
 
@@ -124,12 +126,6 @@ class Automacoes(commands.Cog):
             await log_discord(self.bot, f"❌ **Auditoria:** erro ao buscar roster da guilda: {type(e).__name__}: {e}", "erro")
             return
 
-        cargos_gerenciados = []
-        for id_cargo in CARGOS.values():
-            cargo = guilda_discord.get_role(id_cargo)
-            if cargo:
-                cargos_gerenciados.append(cargo)
-
         demovidos = []
         falhas = []
 
@@ -143,68 +139,38 @@ class Automacoes(commands.Cog):
             if membro.bot:
                 continue
 
-            if any(c.id in ids_imunes for c in membro.roles):
+            if not cargo_dh or cargo_dh not in membro.roles:
                 continue
 
-            cargos_do_membro = [c for c in cargos_gerenciados if c in membro.roles]
-            tem_cargo_die_hard = any(c.id == id_cargo_dh for c in membro.roles)
-
-            if not cargos_do_membro:
+            if any(c.id in ids_imunes for c in membro.roles):
                 continue
 
             nick = membro.display_name
             if " " in nick:
                 nick = nick.split(" ", 1)[1]
 
-            if tem_cargo_die_hard:
-                rebaixar = nick.lower() not in roster_nomes
-            else:
-                rebaixar = False
-                async with aiohttp.ClientSession() as session:
-                    try:
-                        async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/search?q={nick}") as resp:
-                            if resp.status != 200:
-                                await asyncio.sleep(2)
-                                continue
+            if nick.lower() in roster_nomes:
+                continue
 
-                            dados = await resp.json()
-                            jogadores = dados.get('players', [])
-                            jogador_encontrado = next((p for p in jogadores if p['Name'].lower() == nick.lower()), None)
+            # Não está no roster da guilda → remove SÓ o cargo DIE HARD (preserva recém chegado e outros)
+            try:
+                await membro.remove_roles(cargo_dh)
+                demovidos.append(membro)
+                print(f"⚠️ {membro.display_name} foi rebaixado.")
 
-                            if not jogador_encontrado:
-                                rebaixar = True
-                            else:
-                                guild_id_jogador = jogador_encontrado.get('GuildId')
-                                alliance_id_jogador = jogador_encontrado.get('AllianceId')
-                                is_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
-                                is_alianca = (ALIANCA_ALBION_ID and alliance_id_jogador == ALIANCA_ALBION_ID)
-                                if not is_guilda and not is_alianca:
-                                    rebaixar = True
-                    except Exception as e:
-                        print(f"⚠️ Erro na auditoria do jogador {nick}: {e}")
-                        falhas.append(f"• {membro.mention} (`{nick}`) — erro na consulta: {type(e).__name__}")
-                        await asyncio.sleep(2)
-                        continue
-
-            if rebaixar:
                 try:
-                    await membro.remove_roles(*cargos_do_membro)
-                    demovidos.append(membro)
-                    print(f"⚠️ {membro.display_name} foi rebaixado.")
-
-                    try:
-                        await membro.send("⚠️ **Aviso Automático:** Seus cargos no Discord da guilda foram removidos porque nosso sistema detectou que você não está mais na guilda/aliança no jogo. Se isso for um erro, use o comando `!registrar` novamente!")
-                    except discord.Forbidden:
-                        pass
+                    await membro.send("⚠️ **Aviso Automático:** Seu cargo de **Die Hard** foi removido porque nosso sistema detectou que você não está mais na guilda no jogo. Se isso for um erro, use o comando `!registrar` novamente!")
                 except discord.Forbidden:
-                    falhas.append(f"• {membro.mention} (`{nick}`) — **sem permissão**: o cargo do bot precisa ficar ACIMA do cargo dele")
-                    await log_discord(self.bot, f"❌ **Auditoria:** sem permissão pra remover cargo de **{membro.display_name}** — verifica a hierarquia de cargos do bot.", "erro")
-                    print(f"❌ Sem permissão pra rebaixar {membro.display_name}")
-                except Exception as e:
-                    falhas.append(f"• {membro.mention} (`{nick}`) — erro ao remover cargo: {type(e).__name__}: {e}")
-                    await log_discord(self.bot, f"❌ **Auditoria:** erro ao remover cargo de **{membro.display_name}**: {type(e).__name__}: {e}", "erro")
+                    pass
+            except discord.Forbidden:
+                falhas.append(f"• {membro.mention} (`{nick}`) — **sem permissão**: o cargo do bot precisa ficar ACIMA do cargo dele")
+                await log_discord(self.bot, f"❌ **Auditoria:** sem permissão pra remover cargo de **{membro.display_name}** — verifica a hierarquia de cargos do bot.", "erro")
+                print(f"❌ Sem permissão pra rebaixar {membro.display_name}")
+            except Exception as e:
+                falhas.append(f"• {membro.mention} (`{nick}`) — erro ao remover cargo: {type(e).__name__}: {e}")
+                await log_discord(self.bot, f"❌ **Auditoria:** erro ao remover cargo de **{membro.display_name}**: {type(e).__name__}: {e}", "erro")
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
 
         canal_logs = self.bot.get_channel(CANAL_LOGS_ID)
 
@@ -213,7 +179,7 @@ class Automacoes(commands.Cog):
                 desc = ""
                 if demovidos:
                     nomes = "\n".join(f"• {m.mention} (`{m.display_name}`)" for m in demovidos)
-                    desc += f"**{len(demovidos)}** membro(s) tiveram cargos removidos:\n{nomes}\n\n"
+                    desc += f"**{len(demovidos)}** membro(s) tiveram o cargo DIE HARD removido:\n{nomes}\n\n"
                 if falhas:
                     desc += f"**{len(falhas)}** falha(s):\n" + "\n".join(falhas)
                 embed = discord.Embed(
@@ -230,7 +196,7 @@ class Automacoes(commands.Cog):
             if canal_logs:
                 embed = discord.Embed(
                     title="🔍 Auditoria — Sem problemas",
-                    description="Todos os membros conferidos estão na guilda/aliança.",
+                    description="Todos os membros com cargo DIE HARD estão na guilda.",
                     color=discord.Color.green(),
                     timestamp=datetime.now(timezone.utc)
                 )
@@ -567,33 +533,27 @@ class Automacoes(commands.Cog):
             return await ctx.send("❌ Apenas staff pode usar esse comando.", delete_after=10)
 
         guild = ctx.guild
+        id_cargo_dh = CARGOS.get("DIE HARD")
+        cargo_dh = guild.get_role(id_cargo_dh)
 
         nomes_imunes = ["lider", "recrutador", "moderador", "caller", "SUB-LIDER"]
         ids_imunes = [CARGOS.get(nome) for nome in nomes_imunes if CARGOS.get(nome)]
         tem_imune = [c.name for c in membro.roles if c.id in ids_imunes]
 
-        cargos_gerenciados = []
-        for id_cargo in CARGOS.values():
-            cargo = guild.get_role(id_cargo)
-            if cargo:
-                cargos_gerenciados.append(cargo)
-
-        cargos_do_membro = [c for c in cargos_gerenciados if c in membro.roles]
-        tem_cargo_die_hard = any(c.id == CARGOS.get("DIE HARD") for c in membro.roles)
+        tem_cargo_die_hard = bool(cargo_dh) and cargo_dh in membro.roles
 
         linhas = [
             f"👤 {membro.mention} (`{membro.display_name}`)",
-            f"🎭 Cargos gerenciados: {', '.join(c.name for c in cargos_do_membro) or 'nenhum'}",
             f"🛡️ Tem DIE HARD: {'sim' if tem_cargo_die_hard else 'não'}",
             f"🚫 Cargos imunes: {', '.join(tem_imune) or 'nenhum'}",
         ]
 
-        if tem_imune:
-            linhas.append("❌ Membro é imune — a auditoria pula ele.")
+        if not tem_cargo_die_hard:
+            linhas.append("ℹ️ Sem cargo DIE HARD — a auditoria não mexe com ele.")
             return await ctx.send("\n".join(linhas))
 
-        if not cargos_do_membro:
-            linhas.append("❌ Sem cargo gerenciado — a auditoria pula ele.")
+        if tem_imune:
+            linhas.append("❌ Membro é imune (staff) — a auditoria pula ele.")
             return await ctx.send("\n".join(linhas))
 
         nick = membro.display_name
@@ -601,11 +561,11 @@ class Automacoes(commands.Cog):
             nick = nick.split(" ", 1)[1]
         linhas.append(f"🔍 Nick extraído: `{nick}`")
 
-        msg = await ctx.send("\n".join(linhas) + "\n\n⏳ Consultando API...")
+        msg = await ctx.send("\n".join(linhas) + "\n\n⏳ Consultando roster da guilda...")
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/search?q={nick}") as resp:
+                async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/guilds/{GUILDA_ALBION_ID}/members") as resp:
                     if resp.status != 200:
                         await msg.edit(content="\n".join(linhas) + f"\n❌ API retornou status {resp.status}")
                         return
@@ -614,26 +574,12 @@ class Automacoes(commands.Cog):
             await msg.edit(content="\n".join(linhas) + f"\n❌ Erro na API: `{type(e).__name__}: {e}`")
             return
 
-        jogadores = dados.get('players', [])
-        jogador_encontrado = next((p for p in jogadores if p['Name'].lower() == nick.lower()), None)
+        roster_nomes = {m.get("Name", "").lower() for m in dados if m.get("Name")}
 
-        if not jogador_encontrado:
-            linhas.append("⚠️ Jogador não encontrado na API — seria rebaixado (nada foi removido no debug).")
-            return await msg.edit(content="\n".join(linhas))
-
-        guild_id_jogador = jogador_encontrado.get('GuildId')
-        guild_name = jogador_encontrado.get('GuildName')
-        alliance_id_jogador = jogador_encontrado.get('AllianceId')
-
-        if tem_cargo_die_hard:
-            na_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
-            linhas.append(f"🏰 Guilda atual: **{guild_name or 'sem guilda'}**")
-            linhas.append(f"🎯 É DIE HARD → exige estar na Die Hard: {'✅ está na guilda' if na_guilda else '❌ NÃO está → seria rebaixado (nada removido no debug)'}")
+        if nick.lower() in roster_nomes:
+            linhas.append(f"✅ `{nick}` está no roster da guilda ({len(roster_nomes)} jogadores) — nada a fazer.")
         else:
-            is_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
-            is_alianca = (ALIANCA_ALBION_ID and alliance_id_jogador == ALIANCA_ALBION_ID)
-            linhas.append(f"🏰 Guilda atual: **{guild_name or 'sem guilda'}**")
-            linhas.append(f"🎯 Sem DIE HARD → exige guilda OU aliança: {'✅ ok' if (is_guilda or is_alianca) else '❌ seria rebaixado (nada removido no debug)'}")
+            linhas.append(f"❌ `{nick}` NÃO está no roster da guilda ({len(roster_nomes)} jogadores) — seria rebaixado (nada removido no debug).")
 
         await msg.edit(content="\n".join(linhas))
 

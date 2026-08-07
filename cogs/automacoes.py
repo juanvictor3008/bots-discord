@@ -74,10 +74,14 @@ class Automacoes(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.calls_temporarias = set()  # rastreia por ID, não por nome
+        self.auditoria_stop = False
+        self.tarefa_auditoria = None
 
     @commands.Cog.listener()
     async def on_ready(self):
         if not self.auditoria_guilda.is_running():
+            # Não roda imediatamente no boot: primeira execução só após 24h
+            self.auditoria_guilda.next_iteration = datetime.now(timezone.utc) + timedelta(hours=24)
             self.auditoria_guilda.start()
         if not self.farm_de_pontos.is_running():
             self.farm_de_pontos.start()
@@ -92,6 +96,7 @@ class Automacoes(commands.Cog):
         await self._rodar_auditoria()
 
     async def _rodar_auditoria(self):
+        self.auditoria_stop = False
         print("🔍 Iniciando ronda de auditoria na API do Albion...")
 
         if not self.bot.guilds:
@@ -105,6 +110,20 @@ class Automacoes(commands.Cog):
                 guilda_discord = g
                 break
 
+        roster_nomes = set()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/guilds/{GUILDA_ALBION_ID}/members") as resp:
+                    if resp.status != 200:
+                        await log_discord(self.bot, f"❌ **Auditoria:** API de membros da guilda retornou status {resp.status} — auditoria abortada.", "erro")
+                        return
+                    dados = await resp.json()
+                    roster_nomes = {m.get("Name", "").lower() for m in dados if m.get("Name")}
+                    print(f"📊 Roster da guilda: {len(roster_nomes)} jogadores.")
+        except Exception as e:
+            await log_discord(self.bot, f"❌ **Auditoria:** erro ao buscar roster da guilda: {type(e).__name__}: {e}", "erro")
+            return
+
         cargos_gerenciados = []
         for id_cargo in CARGOS.values():
             cargo = guilda_discord.get_role(id_cargo)
@@ -114,12 +133,15 @@ class Automacoes(commands.Cog):
         demovidos = []
         falhas = []
 
+        nomes_imunes = ["lider", "recrutador", "moderador", "caller", "SUB-LIDER"]
+        ids_imunes = [CARGOS.get(nome) for nome in nomes_imunes if CARGOS.get(nome)]
+
         for membro in guilda_discord.members:
+            if self.auditoria_stop:
+                print("🛑 Auditoria interrompida pelo usuário.")
+                break
             if membro.bot:
                 continue
-
-            nomes_imunes = ["lider", "recrutador", "moderador", "caller", "SUB-LIDER"]
-            ids_imunes = [CARGOS.get(nome) for nome in nomes_imunes if CARGOS.get(nome)]
 
             if any(c.id in ids_imunes for c in membro.roles):
                 continue
@@ -134,37 +156,35 @@ class Automacoes(commands.Cog):
             if " " in nick:
                 nick = nick.split(" ", 1)[1]
 
-            rebaixar = False
+            if tem_cargo_die_hard:
+                rebaixar = nick.lower() not in roster_nomes
+            else:
+                rebaixar = False
+                async with aiohttp.ClientSession() as session:
+                    try:
+                        async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/search?q={nick}") as resp:
+                            if resp.status != 200:
+                                await asyncio.sleep(2)
+                                continue
 
-            async with aiohttp.ClientSession() as session:
-                try:
-                    async with session.get(f"https://gameinfo.albiononline.com/api/gameinfo/search?q={nick}") as resp:
-                        if resp.status != 200:
-                            await asyncio.sleep(2)
-                            continue
+                            dados = await resp.json()
+                            jogadores = dados.get('players', [])
+                            jogador_encontrado = next((p for p in jogadores if p['Name'].lower() == nick.lower()), None)
 
-                        dados = await resp.json()
-                        jogadores = dados.get('players', [])
-                        jogador_encontrado = next((p for p in jogadores if p['Name'].lower() == nick.lower()), None)
-
-                        if not jogador_encontrado:
-                            rebaixar = True
-                        else:
-                            guild_id_jogador = jogador_encontrado.get('GuildId')
-                            alliance_id_jogador = jogador_encontrado.get('AllianceId')
-
-                            if tem_cargo_die_hard:
-                                rebaixar = (guild_id_jogador != GUILDA_ALBION_ID)
+                            if not jogador_encontrado:
+                                rebaixar = True
                             else:
+                                guild_id_jogador = jogador_encontrado.get('GuildId')
+                                alliance_id_jogador = jogador_encontrado.get('AllianceId')
                                 is_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
                                 is_alianca = (ALIANCA_ALBION_ID and alliance_id_jogador == ALIANCA_ALBION_ID)
                                 if not is_guilda and not is_alianca:
                                     rebaixar = True
-                except Exception as e:
-                    print(f"⚠️ Erro na auditoria do jogador {nick}: {e}")
-                    falhas.append(f"• {membro.mention} (`{nick}`) — erro na consulta: {type(e).__name__}")
-                    await asyncio.sleep(2)
-                    continue
+                    except Exception as e:
+                        print(f"⚠️ Erro na auditoria do jogador {nick}: {e}")
+                        falhas.append(f"• {membro.mention} (`{nick}`) — erro na consulta: {type(e).__name__}")
+                        await asyncio.sleep(2)
+                        continue
 
             if rebaixar:
                 try:
@@ -516,13 +536,30 @@ class Automacoes(commands.Cog):
         if not _eh_staff(ctx.author):
             return await ctx.send("❌ Apenas staff pode usar esse comando.", delete_after=10)
 
+        if self.tarefa_auditoria and not self.tarefa_auditoria.done():
+            return await ctx.send("⚠️ Já existe uma auditoria em andamento. Use `!pararauditoria` pra interromper.")
+
         msg = await ctx.send("🔍 Iniciando auditoria manual... Isso pode levar alguns minutos.")
+        self.tarefa_auditoria = asyncio.create_task(self._rodar_auditoria())
         try:
-            await self._rodar_auditoria()
+            await self.tarefa_auditoria
+            await msg.edit(content="✅ Auditoria concluída! Confira o relatório no canal de logs.")
+        except asyncio.CancelledError:
+            await msg.edit(content="🛑 Auditoria interrompida.")
         except Exception as e:
             await msg.edit(content=f"❌ Erro durante a auditoria: `{type(e).__name__}: {e}`")
-            return
-        await msg.edit(content="✅ Auditoria concluída! Confira o relatório no canal de logs.")
+
+    @commands.command(name="pararauditoria")
+    async def parar_auditoria(self, ctx):
+        if not _eh_staff(ctx.author):
+            return await ctx.send("❌ Apenas staff pode usar esse comando.", delete_after=10)
+
+        self.auditoria_stop = True
+        if self.tarefa_auditoria and not self.tarefa_auditoria.done():
+            self.tarefa_auditoria.cancel()
+            await ctx.send("🛑 Auditoria sendo interrompida...")
+        else:
+            await ctx.send("🛑 Auditoria marcada pra parar (vale também pro loop agendado de 24h).")
 
     @commands.command(name="conferir")
     async def conferir(self, ctx, membro: discord.Member):

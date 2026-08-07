@@ -88,7 +88,10 @@ class Automacoes(commands.Cog):
     # ==========================================
     @tasks.loop(hours=24)
     async def auditoria_guilda(self):
-        print("🔍 Iniciando ronda de auditoria diária na API do Albion...")
+        await self._rodar_auditoria()
+
+    async def _rodar_auditoria(self):
+        print("🔍 Iniciando ronda de auditoria na API do Albion...")
 
         if not self.bot.guilds:
             return
@@ -484,6 +487,19 @@ class Automacoes(commands.Cog):
             await ctx.send(f"🧹 Canal limpo! {len(deletadas)} mensagens apagadas.", delete_after=10)
         except Exception as e:
             await ctx.send(f"⚠️ Erro ao limpar o canal: {e}", delete_after=10)
+
+    @commands.command(name="auditar")
+    async def auditar(self, ctx):
+        if not _eh_staff(ctx.author):
+            return await ctx.send("❌ Apenas staff pode usar esse comando.", delete_after=10)
+
+        msg = await ctx.send("🔍 Iniciando auditoria manual... Isso pode levar alguns minutos.")
+        try:
+            await self._rodar_auditoria()
+        except Exception as e:
+            await msg.edit(content=f"❌ Erro durante a auditoria: `{type(e).__name__}: {e}`")
+            return
+        await msg.edit(content="✅ Auditoria concluída! Confira o relatório no canal de logs.")
 
 
 async def setup(bot):

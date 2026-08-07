@@ -168,6 +168,7 @@ class Automacoes(commands.Cog):
                 if novo_nick is not None and novo_nick.strip():
                     try:
                         await membro.edit(nick=novo_nick[:32])
+                        await asyncio.sleep(2)
                     except discord.Forbidden:
                         await log_discord(self.bot, f"⚠️ **Auditoria:** não consegui remover a tag `[DH]` do apelido de **{membro.display_name}** (hierarquia).", "aviso")
 
@@ -196,7 +197,7 @@ class Automacoes(commands.Cog):
                 falhas.append(f"• {membro.mention} (`{nick}`) — erro ao remover cargo: {type(e).__name__}: {e}")
                 await log_discord(self.bot, f"❌ **Auditoria:** erro ao remover cargo de **{membro.display_name}**: {type(e).__name__}: {e}", "erro")
 
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
 
         canal_logs = self.bot.get_channel(CANAL_LOGS_ID)
 

@@ -14,6 +14,7 @@ from config import (
     CANAL_LOGS_ID
 )
 from cogs.lfg import _eh_staff
+from utils import log_discord
 
 
 # Arquivo JSON para tempo de call (fallback local)
@@ -97,6 +98,12 @@ class Automacoes(commands.Cog):
             return
 
         guilda_discord = self.bot.guilds[0]
+        id_cargo_dh = CARGOS.get("DIE HARD")
+
+        for g in self.bot.guilds:
+            if g.get_role(id_cargo_dh):
+                guilda_discord = g
+                break
 
         cargos_gerenciados = []
         for id_cargo in CARGOS.values():
@@ -105,6 +112,7 @@ class Automacoes(commands.Cog):
                 cargos_gerenciados.append(cargo)
 
         demovidos = []
+        falhas = []
 
         for membro in guilda_discord.members:
             if membro.bot:
@@ -117,7 +125,7 @@ class Automacoes(commands.Cog):
                 continue
 
             cargos_do_membro = [c for c in cargos_gerenciados if c in membro.roles]
-            tem_cargo_die_hard = any(c.id == CARGOS.get("DIE HARD") for c in membro.roles)
+            tem_cargo_die_hard = any(c.id == id_cargo_dh for c in membro.roles)
 
             if not cargos_do_membro:
                 continue
@@ -125,6 +133,8 @@ class Automacoes(commands.Cog):
             nick = membro.display_name
             if " " in nick:
                 nick = nick.split(" ", 1)[1]
+
+            rebaixar = False
 
             async with aiohttp.ClientSession() as session:
                 try:
@@ -136,8 +146,6 @@ class Automacoes(commands.Cog):
                         dados = await resp.json()
                         jogadores = dados.get('players', [])
                         jogador_encontrado = next((p for p in jogadores if p['Name'].lower() == nick.lower()), None)
-
-                        rebaixar = False
 
                         if not jogador_encontrado:
                             rebaixar = True
@@ -152,31 +160,46 @@ class Automacoes(commands.Cog):
                                 is_alianca = (ALIANCA_ALBION_ID and alliance_id_jogador == ALIANCA_ALBION_ID)
                                 if not is_guilda and not is_alianca:
                                     rebaixar = True
-
-                        if rebaixar:
-                            await membro.remove_roles(*cargos_do_membro)
-                            demovidos.append(membro)
-                            print(f"⚠️ {membro.display_name} foi rebaixado.")
-
-                            try:
-                                await membro.send("⚠️ **Aviso Automático:** Seus cargos no Discord da guilda foram removidos porque nosso sistema detectou que você não está mais na guilda/aliança no jogo. Se isso for um erro, use o comando `!registrar` novamente!")
-                            except discord.Forbidden:
-                                pass
-
                 except Exception as e:
-                    print(f"Erro na auditoria do jogador {nick}: {e}")
+                    print(f"⚠️ Erro na auditoria do jogador {nick}: {e}")
+                    falhas.append(f"• {membro.mention} (`{nick}`) — erro na consulta: {type(e).__name__}")
+                    await asyncio.sleep(2)
+                    continue
+
+            if rebaixar:
+                try:
+                    await membro.remove_roles(*cargos_do_membro)
+                    demovidos.append(membro)
+                    print(f"⚠️ {membro.display_name} foi rebaixado.")
+
+                    try:
+                        await membro.send("⚠️ **Aviso Automático:** Seus cargos no Discord da guilda foram removidos porque nosso sistema detectou que você não está mais na guilda/aliança no jogo. Se isso for um erro, use o comando `!registrar` novamente!")
+                    except discord.Forbidden:
+                        pass
+                except discord.Forbidden:
+                    falhas.append(f"• {membro.mention} (`{nick}`) — **sem permissão**: o cargo do bot precisa ficar ACIMA do cargo dele")
+                    await log_discord(self.bot, f"❌ **Auditoria:** sem permissão pra remover cargo de **{membro.display_name}** — verifica a hierarquia de cargos do bot.", "erro")
+                    print(f"❌ Sem permissão pra rebaixar {membro.display_name}")
+                except Exception as e:
+                    falhas.append(f"• {membro.mention} (`{nick}`) — erro ao remover cargo: {type(e).__name__}: {e}")
+                    await log_discord(self.bot, f"❌ **Auditoria:** erro ao remover cargo de **{membro.display_name}**: {type(e).__name__}: {e}", "erro")
 
             await asyncio.sleep(2)
 
         canal_logs = self.bot.get_channel(CANAL_LOGS_ID)
 
-        if demovidos:
+        if demovidos or falhas:
             if canal_logs:
-                nomes = "\n".join(f"• {m.mention} (`{m.display_name}`)" for m in demovidos)
+                desc = ""
+                if demovidos:
+                    nomes = "\n".join(f"• {m.mention} (`{m.display_name}`)" for m in demovidos)
+                    desc += f"**{len(demovidos)}** membro(s) tiveram cargos removidos:\n{nomes}\n\n"
+                if falhas:
+                    desc += f"**{len(falhas)}** falha(s):\n" + "\n".join(falhas)
                 embed = discord.Embed(
-                    title="🔍 Auditoria — Membros removidos",
-                    description=f"**{len(demovidos)}** membro(s) não estão mais na guilda/aliança e tiveram cargos removidos:\n\n{nomes}",
-                    color=discord.Color.red(),
+                    title="🔍 Auditoria — Relatório",
+                    description=desc,
+                    color=discord.Color.red() if demovidos else discord.Color.gold(),
                     timestamp=datetime.now(timezone.utc)
                 )
                 try:

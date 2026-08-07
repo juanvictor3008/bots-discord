@@ -10,7 +10,8 @@ from config import (
     CARGOS, GUILDA_ALBION_ID, ALIANCA_ALBION_ID,
     MONGO_URI, colecao_tempo_call,
     MINIMO_PESSOAS_CALL, PONTOS_POR_CICLO,
-    MULTIPLICADOR_CALLER, MENSAGEM_CLASSES_ID, REACOES_CLASSES, CANAIS_GERADORES_IDS
+    MULTIPLICADOR_CALLER, MENSAGEM_CLASSES_ID, REACOES_CLASSES, CANAIS_GERADORES_IDS,
+    CANAL_LOGS_ID
 )
 from cogs.lfg import _eh_staff
 
@@ -100,17 +101,20 @@ class Automacoes(commands.Cog):
             if cargo:
                 cargos_gerenciados.append(cargo)
 
+        demovidos = []
+
         for membro in guilda_discord.members:
             if membro.bot:
                 continue
 
-            nomes_imunes = ["lider", "DIE HARD", "recrutador", "moderador", "caller", "SUB-LIDER"]
+            nomes_imunes = ["lider", "recrutador", "moderador", "caller", "SUB-LIDER"]
             ids_imunes = [CARGOS.get(nome) for nome in nomes_imunes if CARGOS.get(nome)]
 
             if any(c.id in ids_imunes for c in membro.roles):
                 continue
 
             cargos_do_membro = [c for c in cargos_gerenciados if c in membro.roles]
+            tem_cargo_die_hard = any(c.id == CARGOS.get("DIE HARD") for c in membro.roles)
 
             if not cargos_do_membro:
                 continue
@@ -138,14 +142,17 @@ class Automacoes(commands.Cog):
                             guild_id_jogador = jogador_encontrado.get('GuildId')
                             alliance_id_jogador = jogador_encontrado.get('AllianceId')
 
-                            is_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
-                            is_alianca = (ALIANCA_ALBION_ID and alliance_id_jogador == ALIANCA_ALBION_ID)
-
-                            if not is_guilda and not is_alianca:
-                                rebaixar = True
+                            if tem_cargo_die_hard:
+                                rebaixar = (guild_id_jogador != GUILDA_ALBION_ID)
+                            else:
+                                is_guilda = (guild_id_jogador == GUILDA_ALBION_ID)
+                                is_alianca = (ALIANCA_ALBION_ID and alliance_id_jogador == ALIANCA_ALBION_ID)
+                                if not is_guilda and not is_alianca:
+                                    rebaixar = True
 
                         if rebaixar:
                             await membro.remove_roles(*cargos_do_membro)
+                            demovidos.append(membro)
                             print(f"⚠️ {membro.display_name} foi rebaixado.")
 
                             try:
@@ -157,6 +164,34 @@ class Automacoes(commands.Cog):
                     print(f"Erro na auditoria do jogador {nick}: {e}")
 
             await asyncio.sleep(2)
+
+        canal_logs = self.bot.get_channel(CANAL_LOGS_ID)
+
+        if demovidos:
+            if canal_logs:
+                nomes = "\n".join(f"• {m.mention} (`{m.display_name}`)" for m in demovidos)
+                embed = discord.Embed(
+                    title="🔍 Auditoria — Membros removidos",
+                    description=f"**{len(demovidos)}** membro(s) não estão mais na guilda/aliança e tiveram cargos removidos:\n\n{nomes}",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                try:
+                    await canal_logs.send(embed=embed)
+                except Exception as e:
+                    print(f"⚠️ Erro ao enviar relatório de auditoria: {e}")
+        else:
+            if canal_logs:
+                embed = discord.Embed(
+                    title="🔍 Auditoria — Sem problemas",
+                    description="Todos os membros conferidos estão na guilda/aliança.",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now(timezone.utc)
+                )
+                try:
+                    await canal_logs.send(embed=embed)
+                except Exception as e:
+                    print(f"⚠️ Erro ao enviar relatório de auditoria: {e}")
 
         print("✅ Base concluída.")
 

@@ -79,14 +79,21 @@ class Automacoes(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        if not self.auditoria_guilda.is_running():
-            # Não roda imediatamente no boot: primeira execução só após 24h
-            self.auditoria_guilda.next_iteration = datetime.now(timezone.utc) + timedelta(hours=24)
-            self.auditoria_guilda.start()
-        if not self.farm_de_pontos.is_running():
-            self.farm_de_pontos.start()
-        if not self.atualizar_tempo_call.is_running():
-            self.atualizar_tempo_call.start()
+        try:
+            if not self.auditoria_guilda.is_running():
+                self.auditoria_guilda.start()
+        except Exception as e:
+            print(f"⚠️ Erro ao iniciar auditoria_guilda: {e}")
+        try:
+            if not self.farm_de_pontos.is_running():
+                self.farm_de_pontos.start()
+        except Exception as e:
+            print(f"⚠️ Erro ao iniciar farm_de_pontos: {e}")
+        try:
+            if not self.atualizar_tempo_call.is_running():
+                self.atualizar_tempo_call.start()
+        except Exception as e:
+            print(f"⚠️ Erro ao iniciar atualizar_tempo_call: {e}")
 
     # ==========================================
     # SISTEMA DE AUDITORIA DE MEMBROS
@@ -94,6 +101,11 @@ class Automacoes(commands.Cog):
     @tasks.loop(hours=24)
     async def auditoria_guilda(self):
         await self._rodar_auditoria()
+
+    @auditoria_guilda.before_loop
+    async def _antes_auditoria(self):
+        # Primeira execução só 24h após o boot (evita correr na inicialização)
+        await asyncio.sleep(86400)
 
     async def _rodar_auditoria(self):
         self.auditoria_stop = False

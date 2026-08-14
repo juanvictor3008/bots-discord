@@ -97,6 +97,12 @@ class Automacoes(commands.Cog):
         self.calls_temporarias = set()  # rastreia por ID, não por nome
         self.auditoria_stop = False
         self.tarefa_auditoria = None
+        self.ultimo_roster = None  # set de nomes (lower) da guilda, do último _buscar_roster() bem-sucedido
+        self.roster_atualizado_em = None  # datetime/ts do último _buscar_roster() bem-sucedido
+
+    def get_roster_cacheado(self):
+        """Retorna o último roster da guilda sincronizado pela auditoria (set de nomes lower) ou None."""
+        return self.ultimo_roster
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -150,6 +156,10 @@ class Automacoes(commands.Cog):
             await log_discord(self.bot, "❌ **Auditoria:** falha ao buscar roster da guilda após 3 tentativas — auditoria abortada.", "erro")
             return
         print(f"📊 Roster da guilda: {len(roster_nomes)} jogadores.")
+
+        # Guarda o roster pra reuso no registro (fallback quando a API ao vivo falha)
+        self.ultimo_roster = roster_nomes
+        self.roster_atualizado_em = datetime.now(timezone.utc)
 
         demovidos = []
         falhas = []

@@ -42,14 +42,76 @@ class RegistrarCog(commands.Cog):
             await asyncio.sleep(2)  # intervalo entre requests
             self.fila.task_done()
 
+    # ——— REGISTRO FALLBACK VIA ROSTER CACHEADO (API instável) ———
+    async def _registrar_pelo_cache(self, membro: discord.Member, nick: str, msg_status, guild: discord.Guild):
+        """Registra como Die Hard usando o roster sincronizado pela auditoria quando a API ao vivo falha."""
+        cargo = guild.get_role(CARGOS.get("DIE HARD"))
+        cargo_recem_chegado = guild.get_role(CARGOS.get("recém chegado"))
+        novo_nick = f'[DH] {nick}'
+
+        try:
+            await membro.edit(nick=novo_nick[:32])
+            if cargo:
+                await membro.add_roles(cargo)
+            if cargo_recem_chegado and cargo_recem_chegado in membro.roles:
+                await membro.remove_roles(cargo_recem_chegado)
+            cargo_menção = f'<@&{cargo.id}>' if cargo else '**DIE HARD**'
+            await msg_status.edit(
+                content=f'✅ **{nick}** registrado como membro da **Die Hard** '
+                        f'(dados do último roster sincronizado — API instável)!\n'
+                        f'👤 Apelido alterado para `{novo_nick}`\n'
+                        f'🛡️ Cargo {cargo_menção} atribuído a {membro.mention}.'
+            )
+        except discord.Forbidden:
+            await msg_status.edit(
+                content=f'❌ Sem permissão pra alterar apelido/cargo de {membro.mention}. Verifica se meu cargo está acima do dele.'
+            )
+
     # ——— BUSCA NA API E REGISTRA ———
     async def buscar_e_registrar(self, membro: discord.Member, nick: str, msg_status, guild: discord.Guild):
+        MAX_TENTATIVAS = 3
+        TIMEOUT = 25  # API com picos de resposta lenta (30-40s+); 15s estourava com frequência
+
+        # Cache do roster da guilda sincronizado pela auditoria (fallback quando a API ao vivo falha)
+        automacoes_cog = self.bot.get_cog("Automacoes") if self.bot else None
+        roster_cache = automacoes_cog.get_roster_cacheado() if automacoes_cog else None
+        nick_no_roster = bool(roster_cache) and nick.lower() in roster_cache
+
+        dados = None
+        erro_api = None
         async with aiohttp.ClientSession() as session:
             url = API_BUSCA.format(nick)
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status != 200:
-                    return await msg_status.edit(content=f'❌ API retornou erro ({resp.status}) pra **{nick}**.')
-                dados = await resp.json()
+            for tentativa in range(1, MAX_TENTATIVAS + 1):
+                try:
+                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as resp:
+                        if resp.status == 200:
+                            dados = await resp.json()
+                            break
+                        if resp.status in (502, 503, 504):
+                            # Erros temporários: retry com backoff crescente
+                            erro_api = f'API do Albion instável ({resp.status})'
+                        else:
+                            # Erros sem retry (404, 400, ...)
+                            return await msg_status.edit(content=f'❌ API retornou erro ({resp.status}) pra **{nick}**.')
+                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+                    # Timeout ou falha de conexão: mesma política de retry
+                    erro_api = f'API do Albion instável ({type(e).__name__})'
+
+                if tentativa < MAX_TENTATIVAS:
+                    await msg_status.edit(
+                        content=f'🔍 Buscando **{nick}**... (API lenta, tentativa {tentativa + 1}/{MAX_TENTATIVAS})'
+                    )
+                    await asyncio.sleep(5 * tentativa)
+                else:
+                    break
+
+        if dados is None:
+            if nick_no_roster:
+                # Fallback: completo o registro com os dados do último roster sincronizado
+                return await self._registrar_pelo_cache(membro, nick, msg_status, guild)
+            return await msg_status.edit(
+                content=f'❌ {erro_api or "API do Albion não respondeu"} após {MAX_TENTATIVAS} tentativas. Tenta de novo em alguns minutos.'
+            )
 
         jogadores = dados.get('players', [])
 

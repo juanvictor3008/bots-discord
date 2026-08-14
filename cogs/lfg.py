@@ -931,9 +931,10 @@ class ItemSelecionarTemplate(discord.ui.Select):
     def __init__(self, cog: "LFG"):
         self.cog = cog
         self.pagina = 0
-        self._reconstruir_opcoes(0)
+        opcoes, placeholder = self._montar_opcoes(0)
+        super().__init__(placeholder=placeholder, options=opcoes)
 
-    def _reconstruir_opcoes(self, pagina):
+    def _montar_opcoes(self, pagina):
         nomes = list(self.cog.templates.keys())
         fixos = 1  # opção "🆕 Criar do zero"
         if len(nomes) + fixos <= 25:
@@ -957,18 +958,20 @@ class ItemSelecionarTemplate(discord.ui.Select):
             opcoes.append(discord.SelectOption(label=nome[:100], value=nome))
 
         if total > 1:
-            self.placeholder = f"Escolha um template ({self.pagina + 1}/{total})..."
+            placeholder = f"Escolha um template ({self.pagina + 1}/{total})..."
         else:
-            self.placeholder = "Escolha um template ou crie do zero..."
+            placeholder = "Escolha um template ou crie do zero..."
+        return opcoes, placeholder
+
+    def _atualizar_pagina(self, pagina):
+        opcoes, placeholder = self._montar_opcoes(pagina)
         self.options = opcoes
+        self.placeholder = placeholder
 
     async def callback(self, interaction: discord.Interaction):
         escolha = self.values[0]
-        if escolha == "__prev__":
-            self._reconstruir_opcoes(self.pagina - 1)
-            return await interaction.response.edit_message(view=self.view)
-        if escolha == "__next__":
-            self._reconstruir_opcoes(self.pagina + 1)
+        if escolha in ("__prev__", "__next__"):
+            self._atualizar_pagina(self.pagina + (1 if escolha == "__next__" else -1))
             return await interaction.response.edit_message(view=self.view)
         if escolha == "__novo__":
             await interaction.response.send_modal(ModalCriarConteudo(self.cog))
@@ -994,9 +997,10 @@ class ItemMenuTemplate(discord.ui.Select):
     def __init__(self, cog: "LFG"):
         self.cog = cog
         self.pagina = 0
-        self._reconstruir_opcoes(0)
+        opcoes, placeholder = self._montar_opcoes(0)
+        super().__init__(placeholder=placeholder, options=opcoes)
 
-    def _reconstruir_opcoes(self, pagina):
+    def _montar_opcoes(self, pagina):
         nomes = list(self.cog.templates.keys())
         fixos = 2  # opções "criar" e "listar"
         if len(nomes) + fixos <= 25:
@@ -1021,19 +1025,21 @@ class ItemMenuTemplate(discord.ui.Select):
             opcoes.append(discord.SelectOption(label=f"⚙️ Gerenciar: {nome}"[:100], value=nome))
 
         if total > 1:
-            self.placeholder = f"O que você quer fazer? ({self.pagina + 1}/{total})"
+            placeholder = f"O que você quer fazer? ({self.pagina + 1}/{total})"
         else:
-            self.placeholder = "O que você quer fazer?"
+            placeholder = "O que você quer fazer?"
+        return opcoes, placeholder
+
+    def _atualizar_pagina(self, pagina):
+        opcoes, placeholder = self._montar_opcoes(pagina)
         self.options = opcoes
+        self.placeholder = placeholder
 
     async def callback(self, interaction: discord.Interaction):
         escolha = self.values[0]
 
-        if escolha == "__prev__":
-            self._reconstruir_opcoes(self.pagina - 1)
-            return await interaction.response.edit_message(view=self.view)
-        if escolha == "__next__":
-            self._reconstruir_opcoes(self.pagina + 1)
+        if escolha in ("__prev__", "__next__"):
+            self._atualizar_pagina(self.pagina + (1 if escolha == "__next__" else -1))
             return await interaction.response.edit_message(view=self.view)
 
         if escolha == "__criar__":

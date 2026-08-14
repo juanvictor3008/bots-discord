@@ -1,7 +1,8 @@
-discord.py
-aiohttp
-Flask
-motor
-openpyxl
-python-dotenv
-certifi
+discord.py==2.7.1
+aiohttp==3.14.1
+Flask==3.1.3
+motor==3.7.1
+pymongo==4.17.0
+openpyxl==3.1.5
+python-dotenv==1.2.1
+certifi==2025.1.31

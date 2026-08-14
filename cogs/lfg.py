@@ -3,6 +3,7 @@ import re
 import json
 import os
 import asyncio
+import unicodedata
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
@@ -56,6 +57,124 @@ def _truncar_texto(texto, limite):
         comprimento += len(p) + 1
     sufixo = f"\n… (+{resto} linhas)" if resto else "\n…"
     return "\n".join(cortado) + sufixo
+
+
+# ==========================================
+# CATEGORIAS DE BUILD — AGRUPAMENTO DO EMBED
+# ==========================================
+
+CATEGORIA_FRONTLINE = "Frontline"
+CATEGORIA_SUPPORT = "Support"
+CATEGORIA_DAMAGE = "Damage"
+CATEGORIA_UTILIDADE = "Utilidade"
+CATEGORIA_OUTROS = "Outros"
+
+ORDEM_CATEGORIAS = [
+    CATEGORIA_FRONTLINE,
+    CATEGORIA_SUPPORT,
+    CATEGORIA_DAMAGE,
+    CATEGORIA_UTILIDADE,
+    CATEGORIA_OUTROS,
+]
+
+EMOJIS_CATEGORIA = {
+    CATEGORIA_FRONTLINE: "🛡️",
+    CATEGORIA_SUPPORT: "💖",
+    CATEGORIA_DAMAGE: "⚔️",
+    CATEGORIA_UTILIDADE: "🔧",
+    CATEGORIA_OUTROS: "📦",
+}
+
+# Mapeamento direto nome_da_classe -> categoria (chaves normalizadas, sem acento).
+# Classe fora do dicionário cai nas palavras-chave e, por fim, em "Outros".
+CATEGORIAS_CLASSES = {
+    # Frontline
+    "tank": CATEGORIA_FRONTLINE, "tanque": CATEGORIA_FRONTLINE,
+    "martelo": CATEGORIA_FRONTLINE, "martelo de guerra": CATEGORIA_FRONTLINE,
+    "maca": CATEGORIA_FRONTLINE, "maca de guerra": CATEGORIA_FRONTLINE,
+    "gladio": CATEGORIA_FRONTLINE, "espada": CATEGORIA_FRONTLINE,
+    "espadão": CATEGORIA_FRONTLINE, "espadon": CATEGORIA_FRONTLINE,
+    "claymore": CATEGORIA_FRONTLINE, "escudo": CATEGORIA_FRONTLINE,
+    "machado": CATEGORIA_FRONTLINE, "machado de guerra": CATEGORIA_FRONTLINE,
+    "ironclad": CATEGORIA_FRONTLINE, "cajado maia": CATEGORIA_FRONTLINE,
+    # Support
+    "suporte": CATEGORIA_SUPPORT, "support": CATEGORIA_SUPPORT,
+    "healer": CATEGORIA_SUPPORT, "heal": CATEGORIA_SUPPORT,
+    "cura": CATEGORIA_SUPPORT, "curandeiro": CATEGORIA_SUPPORT,
+    "cajado sagrado": CATEGORIA_SUPPORT, "cajado da natureza": CATEGORIA_SUPPORT,
+    "cajado divino": CATEGORIA_SUPPORT, "cajado da vida": CATEGORIA_SUPPORT,
+    "cajado das bruxas": CATEGORIA_SUPPORT, "cajado dos sonhos": CATEGORIA_SUPPORT,
+    # Damage
+    "dps": CATEGORIA_DAMAGE, "dano": CATEGORIA_DAMAGE, "damage": CATEGORIA_DAMAGE,
+    "cajado anomalo": CATEGORIA_DAMAGE, "cajado amaldicoado": CATEGORIA_DAMAGE,
+    "arco amaldicoado": CATEGORIA_DAMAGE, "arco": CATEGORIA_DAMAGE,
+    "arco longo": CATEGORIA_DAMAGE, "arco de guerra": CATEGORIA_DAMAGE,
+    "arco maligno": CATEGORIA_DAMAGE, "besta": CATEGORIA_DAMAGE,
+    "adaga": CATEGORIA_DAMAGE, "adagas": CATEGORIA_DAMAGE,
+    "cajado de fogo": CATEGORIA_DAMAGE, "cajado de gelo": CATEGORIA_DAMAGE,
+    "lanca": CATEGORIA_DAMAGE, "lanca de espirito": CATEGORIA_DAMAGE,
+    "tridente": CATEGORIA_DAMAGE, "cajado das sombras": CATEGORIA_DAMAGE,
+    # Utilidade
+    "util": CATEGORIA_UTILIDADE, "utilidade": CATEGORIA_UTILIDADE,
+    "utility": CATEGORIA_UTILIDADE, "off role": CATEGORIA_UTILIDADE,
+    "offrole": CATEGORIA_UTILIDADE, "off-role": CATEGORIA_UTILIDADE,
+    "flex": CATEGORIA_UTILIDADE, "cajado arcano": CATEGORIA_UTILIDADE,
+    "opressor": CATEGORIA_UTILIDADE, "cajado de energia": CATEGORIA_UTILIDADE,
+}
+
+# Palavras-chave (tokens únicos) usadas como fallback para builds não mapeadas.
+PALAVRAS_CATEGORIA = {
+    CATEGORIA_FRONTLINE: {"tank", "tanque", "front", "frontline", "frente", "iniciador",
+                         "init", "martelo", "maca", "gladio", "espada", "espadon",
+                         "claymore", "escudo", "porrete", "machado", "ironclad"},
+    CATEGORIA_SUPPORT: {"suporte", "support", "healer", "heal", "cura", "curandeiro",
+                       "sacerdote", "sagrado", "natureza", "divino", "vida", "bruxas",
+                       "sonhos", "holy", "nature"},
+    CATEGORIA_DAMAGE: {"dps", "dano", "damage", "dd", "arco", "besta", "adaga",
+                      "amaldicoado", "anomalo", "fogo", "gelo", "lanca", "tridente",
+                      "sangue", "demonio", "runas", "sombras", "bow", "fire", "frost"},
+    CATEGORIA_UTILIDADE: {"util", "utilidade", "utility", "offrole", "off", "flex",
+                         "arcano", "opressor", "energia", "manto", "arcane"},
+}
+
+
+def _normalizar(texto):
+    """Minúsculas e sem acentos, pra casar nomes digitados de formas diferentes."""
+    nfd = unicodedata.normalize("NFD", texto.lower())
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
+def _categorizar_classe(nome_classe):
+    """Retorna a categoria da classe (Frontline/Support/Damage/Utilidade/Outros)."""
+    chave = _normalizar(nome_classe).strip()
+    if chave in CATEGORIAS_CLASSES:
+        return CATEGORIAS_CLASSES[chave]
+    tokens = set(chave.split())
+    for categoria in PALAVRAS_CATEGORIA:
+        if tokens & PALAVRAS_CATEGORIA[categoria]:
+            return categoria
+    return CATEGORIA_OUTROS
+
+
+def _dividir_categoria(categoria, itens, limite=1000):
+    """Quebra uma categoria em 1+ campos respeitando o limite de chars por field."""
+    campos = []
+    partes = []
+    tamanho = 0
+    sufixo = ""
+    for nome, texto in itens:
+        item = f"**{nome}**\n{texto}"
+        acrescimo = len(item) + (2 if partes else 0)
+        if partes and tamanho + acrescimo > limite:
+            campos.append((f"{categoria}{sufixo}", "\n\n".join(partes)))
+            sufixo = " (cont.)"
+            partes = []
+            tamanho = 0
+        partes.append(item)
+        tamanho += len(item) + (2 if len(partes) > 1 else 0)
+    if partes:
+        campos.append((f"{categoria}{sufixo}", "\n\n".join(partes)))
+    return campos
 
 def _usando_mongo():
     return MONGO_URI is not None and colecao_templates is not None
@@ -578,13 +697,11 @@ class PainelVagas(discord.ui.View):
             await salvar_eventos(lfg_cog.eventos_ativos)
 
     def _campos_vagas(self):
-        """Monta os campos do embed agrupando classes para não estourar 25 fields."""
-        campos = []
-        bloco = []
-        tamanho_bloco = 0
-        limite_caracteres = 900
+        """Monta os campos do embed agrupando as classes por categoria de build."""
+        agrupado = {cat: [] for cat in ORDEM_CATEGORIAS}
 
         for classe, vagas_totais in self.max_vagas.items():
+            categoria = _categorizar_classe(classe)
             inscritos = self.jogadores.get(classe, [])
             reserva = self.fila_espera.get(classe, [])
             texto_jogadores = "\n".join(inscritos) if inscritos else "*Vazio*"
@@ -596,29 +713,18 @@ class PainelVagas(discord.ui.View):
                 texto_final = texto_jogadores
 
             texto_final = _truncar_texto(texto_final, 850)
-            nome = f"🛡️ {classe} ({len(inscritos)}/{vagas_totais})"
-            item = (nome, texto_final)
+            nome = f"🛡️ {classe} ({len(inscritos)}/{vagas_totais})"[:100]
+            agrupado[categoria].append((nome, texto_final))
 
-            if bloco and (len(bloco) >= 2 or tamanho_bloco + len(nome) + len(texto_final) > limite_caracteres):
-                campos.append(bloco)
-                bloco = []
-                tamanho_bloco = 0
-            bloco.append(item)
-            tamanho_bloco += len(nome) + len(texto_final)
-
-        if bloco:
-            campos.append(bloco)
-
-        resultado = []
-        for bloco_field in campos[:25]:
-            if len(bloco_field) == 1:
-                nome_unico, valor = bloco_field[0]
-                resultado.append((nome_unico[:256], valor))
-            else:
-                nomes = " + ".join(n.replace("🛡️ ", "", 1).split(" (")[0] for n, _ in bloco_field)
-                valor = "\n\n".join(f"**{n}**\n{v}" for n, v in bloco_field)
-                resultado.append((f"🛡️ {nomes}"[:100], valor))
-        return resultado
+        campos = []
+        for categoria in ORDEM_CATEGORIAS:
+            itens = agrupado[categoria]
+            if not itens:
+                continue
+            emoji = EMOJIS_CATEGORIA.get(categoria, "📦")
+            for nome_campo, valor in _dividir_categoria(f"{emoji} {categoria}", itens):
+                campos.append((nome_campo, valor))
+        return campos
 
     def gerar_embed(self):
         titulo_destaque = f"💥 {self.conteudo.upper()} 💥"
@@ -660,14 +766,15 @@ class PainelVagas(discord.ui.View):
         base = len(embed.title or "") + len(embed.description or "") + len(embed.footer.text or "")
         orcamento = 6000 - base
         for nome_field, valor_field in campos:
-            if orcamento <= 0:
+            espaco = orcamento - len(nome_field)
+            if espaco <= 0:
                 break
-            if len(valor_field) > orcamento:
-                valor_field = _truncar_texto(valor_field, max(50, orcamento - 25))
-                if len(valor_field) > orcamento:
-                    valor_field = valor_field[:orcamento]
-            orcamento -= len(nome_field) + len(valor_field)
-            embed.add_field(name=nome_field, value=valor_field, inline=False)
+            if len(valor_field) > espaco:
+                valor_field = _truncar_texto(valor_field, max(50, espaco - 25))
+                if len(valor_field) > espaco:
+                    valor_field = valor_field[:espaco]
+            orcamento = espaco - len(valor_field)
+            embed.add_field(name=nome_field, value=valor_field, inline=True)
 
         return embed
 

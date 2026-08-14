@@ -3,7 +3,6 @@ import re
 import json
 import os
 import asyncio
-import unicodedata
 from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
@@ -60,100 +59,62 @@ def _truncar_texto(texto, limite):
 
 
 # ==========================================
-# CATEGORIAS DE BUILD — AGRUPAMENTO DO EMBED
+# CATEGORIAS MANUAIS — AGRUPAMENTO DO EMBED
 # ==========================================
 
-CATEGORIA_FRONTLINE = "Frontline"
-CATEGORIA_SUPPORT = "Support"
-CATEGORIA_DAMAGE = "Damage"
-CATEGORIA_UTILIDADE = "Utilidade"
-CATEGORIA_OUTROS = "Outros"
+CATEGORIA_PADRAO = "Geral"
 
-ORDEM_CATEGORIAS = [
-    CATEGORIA_FRONTLINE,
-    CATEGORIA_SUPPORT,
-    CATEGORIA_DAMAGE,
-    CATEGORIA_UTILIDADE,
-    CATEGORIA_OUTROS,
-]
-
+# Apenas cosmético: emoji exibido no título do field da categoria.
+# Categoria desconhecida usa 📦. NÃO existe mapeamento de classe -> categoria.
 EMOJIS_CATEGORIA = {
-    CATEGORIA_FRONTLINE: "🛡️",
-    CATEGORIA_SUPPORT: "💖",
-    CATEGORIA_DAMAGE: "⚔️",
-    CATEGORIA_UTILIDADE: "🔧",
-    CATEGORIA_OUTROS: "📦",
-}
-
-# Mapeamento direto nome_da_classe -> categoria (chaves normalizadas, sem acento).
-# Classe fora do dicionário cai nas palavras-chave e, por fim, em "Outros".
-CATEGORIAS_CLASSES = {
-    # Frontline
-    "tank": CATEGORIA_FRONTLINE, "tanque": CATEGORIA_FRONTLINE,
-    "martelo": CATEGORIA_FRONTLINE, "martelo de guerra": CATEGORIA_FRONTLINE,
-    "maca": CATEGORIA_FRONTLINE, "maca de guerra": CATEGORIA_FRONTLINE,
-    "gladio": CATEGORIA_FRONTLINE, "espada": CATEGORIA_FRONTLINE,
-    "espadão": CATEGORIA_FRONTLINE, "espadon": CATEGORIA_FRONTLINE,
-    "claymore": CATEGORIA_FRONTLINE, "escudo": CATEGORIA_FRONTLINE,
-    "machado": CATEGORIA_FRONTLINE, "machado de guerra": CATEGORIA_FRONTLINE,
-    "ironclad": CATEGORIA_FRONTLINE, "cajado maia": CATEGORIA_FRONTLINE,
-    # Support
-    "suporte": CATEGORIA_SUPPORT, "support": CATEGORIA_SUPPORT,
-    "healer": CATEGORIA_SUPPORT, "heal": CATEGORIA_SUPPORT,
-    "cura": CATEGORIA_SUPPORT, "curandeiro": CATEGORIA_SUPPORT,
-    "cajado sagrado": CATEGORIA_SUPPORT, "cajado da natureza": CATEGORIA_SUPPORT,
-    "cajado divino": CATEGORIA_SUPPORT, "cajado da vida": CATEGORIA_SUPPORT,
-    "cajado das bruxas": CATEGORIA_SUPPORT, "cajado dos sonhos": CATEGORIA_SUPPORT,
-    # Damage
-    "dps": CATEGORIA_DAMAGE, "dano": CATEGORIA_DAMAGE, "damage": CATEGORIA_DAMAGE,
-    "cajado anomalo": CATEGORIA_DAMAGE, "cajado amaldicoado": CATEGORIA_DAMAGE,
-    "arco amaldicoado": CATEGORIA_DAMAGE, "arco": CATEGORIA_DAMAGE,
-    "arco longo": CATEGORIA_DAMAGE, "arco de guerra": CATEGORIA_DAMAGE,
-    "arco maligno": CATEGORIA_DAMAGE, "besta": CATEGORIA_DAMAGE,
-    "adaga": CATEGORIA_DAMAGE, "adagas": CATEGORIA_DAMAGE,
-    "cajado de fogo": CATEGORIA_DAMAGE, "cajado de gelo": CATEGORIA_DAMAGE,
-    "lanca": CATEGORIA_DAMAGE, "lanca de espirito": CATEGORIA_DAMAGE,
-    "tridente": CATEGORIA_DAMAGE, "cajado das sombras": CATEGORIA_DAMAGE,
-    # Utilidade
-    "util": CATEGORIA_UTILIDADE, "utilidade": CATEGORIA_UTILIDADE,
-    "utility": CATEGORIA_UTILIDADE, "off role": CATEGORIA_UTILIDADE,
-    "offrole": CATEGORIA_UTILIDADE, "off-role": CATEGORIA_UTILIDADE,
-    "flex": CATEGORIA_UTILIDADE, "cajado arcano": CATEGORIA_UTILIDADE,
-    "opressor": CATEGORIA_UTILIDADE, "cajado de energia": CATEGORIA_UTILIDADE,
-}
-
-# Palavras-chave (tokens únicos) usadas como fallback para builds não mapeadas.
-PALAVRAS_CATEGORIA = {
-    CATEGORIA_FRONTLINE: {"tank", "tanque", "front", "frontline", "frente", "iniciador",
-                         "init", "martelo", "maca", "gladio", "espada", "espadon",
-                         "claymore", "escudo", "porrete", "machado", "ironclad"},
-    CATEGORIA_SUPPORT: {"suporte", "support", "healer", "heal", "cura", "curandeiro",
-                       "sacerdote", "sagrado", "natureza", "divino", "vida", "bruxas",
-                       "sonhos", "holy", "nature"},
-    CATEGORIA_DAMAGE: {"dps", "dano", "damage", "dd", "arco", "besta", "adaga",
-                      "amaldicoado", "anomalo", "fogo", "gelo", "lanca", "tridente",
-                      "sangue", "demonio", "runas", "sombras", "bow", "fire", "frost"},
-    CATEGORIA_UTILIDADE: {"util", "utilidade", "utility", "offrole", "off", "flex",
-                         "arcano", "opressor", "energia", "manto", "arcane"},
+    "Frontline": "🛡️",
+    "Support": "💖",
+    "Damage": "⚔️",
+    "Utilidade": "🔧",
+    "Geral": "📦",
 }
 
 
-def _normalizar(texto):
-    """Minúsculas e sem acentos, pra casar nomes digitados de formas diferentes."""
-    nfd = unicodedata.normalize("NFD", texto.lower())
-    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+def _parse_definicao_vagas(texto):
+    """Faz o parse do texto de vagas digitado no modal.
 
+    Sintaxe:
+      !Frontline   -> abre a categoria "Frontline"
+      Tank:1       -> entra na categoria atual (ou "Geral" se nenhum "!" foi visto)
 
-def _categorizar_classe(nome_classe):
-    """Retorna a categoria da classe (Frontline/Support/Damage/Utilidade/Outros)."""
-    chave = _normalizar(nome_classe).strip()
-    if chave in CATEGORIAS_CLASSES:
-        return CATEGORIAS_CLASSES[chave]
-    tokens = set(chave.split())
-    for categoria in PALAVRAS_CATEGORIA:
-        if tokens & PALAVRAS_CATEGORIA[categoria]:
-            return categoria
-    return CATEGORIA_OUTROS
+    Retorna (definicao_vagas, categoria_da_classe) ou (None, mensagem_de_erro).
+    """
+    definicao_vagas = {}
+    categoria_da_classe = {}
+    categoria_atual = None
+
+    for linha in texto.splitlines():
+        linha_limpa = linha.strip().rstrip(',').strip()
+        if not linha_limpa:
+            continue
+
+        if linha_limpa.startswith("!"):
+            categoria_atual = linha_limpa[1:].strip()
+            if not categoria_atual:
+                return None, "❌ Categoria vazia detectada. Use `!NomeDaCategoria`, ex: `!Frontline`."
+            continue
+
+        if ":" not in linha_limpa:
+            return None, f"❌ Formato inválido em `{linha_limpa}`. Use `Classe:Qtd` ou `!Categoria`."
+
+        nome_classe, qtd = linha_limpa.split(":", 1)
+        nome_classe = nome_classe.strip()
+        qtd = qtd.strip()
+        if not qtd.isdigit():
+            return None, f"❌ Quantidade inválida em `{linha_limpa}`. Use um número, ex: `Tank:2`."
+
+        if categoria_atual is None:
+            categoria_atual = CATEGORIA_PADRAO
+
+        definicao_vagas[nome_classe] = int(qtd)
+        categoria_da_classe[nome_classe] = categoria_atual
+
+    return definicao_vagas, categoria_da_classe
 
 
 def _dividir_categoria(categoria, itens, limite=1000):
@@ -175,6 +136,21 @@ def _dividir_categoria(categoria, itens, limite=1000):
     if partes:
         campos.append((f"{categoria}{sufixo}", "\n\n".join(partes)))
     return campos
+
+def _texto_vagas_para_edicao(definicao_vagas, categoria_da_classe=None):
+    """Reconstroi o texto de vagas com marcadores !Categoria pra preencher modais de edição."""
+    if not categoria_da_classe:
+        categoria_da_classe = {c: CATEGORIA_PADRAO for c in definicao_vagas}
+    linhas = []
+    ultima_categoria = None
+    for classe, qtd in definicao_vagas.items():
+        categoria = categoria_da_classe.get(classe, CATEGORIA_PADRAO)
+        if categoria != ultima_categoria:
+            linhas.append(f"!{categoria}")
+            ultima_categoria = categoria
+        linhas.append(f"{classe}:{qtd}")
+    return "\n".join(linhas)
+
 
 def _usando_mongo():
     return MONGO_URI is not None and colecao_templates is not None
@@ -201,7 +177,13 @@ async def carregar_templates():
     if _usando_mongo():
         templates = {}
         async for doc in colecao_templates.find():
-            templates[doc["_id"]] = {"vagas": doc.get("vagas", {}), "descricao": doc.get("descricao"), "criador_id": doc.get("criador_id")}
+            vagas = doc.get("vagas", {})
+            templates[doc["_id"]] = {
+                "vagas": vagas,
+                "categoria_da_classe": doc.get("categoria_da_classe") or {c: CATEGORIA_PADRAO for c in vagas},
+                "descricao": doc.get("descricao"),
+                "criador_id": doc.get("criador_id"),
+            }
         return templates
     if os.path.exists(TEMPLATES_PATH):
         try:
@@ -220,7 +202,7 @@ async def salvar_templates(templates):
     if _usando_mongo():
         await colecao_templates.delete_many({})
         if templates:
-            docs = [{"_id": nome, "vagas": dados["vagas"], "descricao": dados.get("descricao"), "criador_id": dados.get("criador_id")} for nome, dados in templates.items()]
+            docs = [{"_id": nome, "vagas": dados["vagas"], "categoria_da_classe": dados.get("categoria_da_classe"), "descricao": dados.get("descricao"), "criador_id": dados.get("criador_id")} for nome, dados in templates.items()]
             await colecao_templates.insert_many(docs)
     else:
         with open(TEMPLATES_PATH, "w", encoding="utf-8") as f:
@@ -254,6 +236,8 @@ def _migrar_evento(evento):
         else:
             evento["status"] = "formando"
         evento.pop("encerrado", None)
+    if "categoria_da_classe" not in evento and "max_vagas" in evento:
+        evento["categoria_da_classe"] = {c: CATEGORIA_PADRAO for c in evento["max_vagas"]}
     return evento
 
 
@@ -557,10 +541,11 @@ class ModalPuxarMembro(discord.ui.Modal, title="👑 Puxar Membro para a PT"):
 
 
 class PainelVagas(discord.ui.View):
-    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None, foods=1, message_id=None, jump_url=None):
+    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None, foods=1, message_id=None, jump_url=None, categoria_da_classe=None):
         super().__init__(timeout=None)
         self.conteudo = conteudo
         self.max_vagas = definicao_vagas
+        self.categoria_da_classe = dict(categoria_da_classe) if categoria_da_classe else {c: CATEGORIA_PADRAO for c in definicao_vagas}
         self.autor_id = autor_id
         self.unix_timestamp = unix_timestamp
         self.descricao = descricao
@@ -691,17 +676,18 @@ class PainelVagas(discord.ui.View):
                     evento["fila_espera"] = dict(self.fila_espera)
                     evento["status"] = self.status
                     evento["max_vagas"] = dict(self.max_vagas)
+                    evento["categoria_da_classe"] = dict(self.categoria_da_classe)
                     if self.call_id:
                         evento["call_id"] = self.call_id
                     break
             await salvar_eventos(lfg_cog.eventos_ativos)
 
     def _campos_vagas(self):
-        """Monta os campos do embed agrupando as classes por categoria de build."""
-        agrupado = {cat: [] for cat in ORDEM_CATEGORIAS}
+        """Monta os campos do embed agrupando as classes pela categoria manual definida no texto."""
+        agrupado = {}
 
         for classe, vagas_totais in self.max_vagas.items():
-            categoria = _categorizar_classe(classe)
+            categoria = self.categoria_da_classe.get(classe, CATEGORIA_PADRAO)
             inscritos = self.jogadores.get(classe, [])
             reserva = self.fila_espera.get(classe, [])
             texto_jogadores = "\n".join(inscritos) if inscritos else "*Vazio*"
@@ -714,13 +700,10 @@ class PainelVagas(discord.ui.View):
 
             texto_final = _truncar_texto(texto_final, 850)
             nome = f"🛡️ {classe} ({len(inscritos)}/{vagas_totais})"[:100]
-            agrupado[categoria].append((nome, texto_final))
+            agrupado.setdefault(categoria, []).append((nome, texto_final))
 
         campos = []
-        for categoria in ORDEM_CATEGORIAS:
-            itens = agrupado[categoria]
-            if not itens:
-                continue
+        for categoria, itens in agrupado.items():
             emoji = EMOJIS_CATEGORIA.get(categoria, "📦")
             for nome_campo, valor in _dividir_categoria(f"{emoji} {categoria}", itens):
                 campos.append((nome_campo, valor))
@@ -896,7 +879,7 @@ class PainelVagas(discord.ui.View):
         if not _eh_lider_ou_staff(interaction.user, self.autor_id):
             return await interaction.response.send_message("❌ Apenas o líder da PT ou a staff pode editar.", ephemeral=True)
 
-        vagas_str = "\n".join(f"{c}:{q}" for c, q in self.max_vagas.items())
+        vagas_str = _texto_vagas_para_edicao(self.max_vagas, self.categoria_da_classe)
         modal = ModalEditarConteudo(self, interaction.user)
         modal.titulo.default = self.conteudo[:100]
         modal.descricao_input.default = self.descricao or ""
@@ -968,22 +951,10 @@ class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
         conteudo = self.titulo.value.strip()
         descricao = self.descricao_input.value.strip() or None
 
-        definicao_vagas = {}
-        for linha in self.vagas_input.value.splitlines():
-            linha_limpa = linha.strip().rstrip(',').strip()
-            if not linha_limpa:
-                continue
-            if ":" not in linha_limpa:
-                return await interaction.response.send_message(
-                    f"❌ Formato inválido em `{linha_limpa}`. Use `Classe:Qtd`.", ephemeral=True
-                )
-            nome_classe, qtd = linha_limpa.split(":", 1)
-            qtd = qtd.strip()
-            if not qtd.isdigit():
-                return await interaction.response.send_message(
-                    f"❌ Quantidade inválida em `{linha_limpa}`. Use um número.", ephemeral=True
-                )
-            definicao_vagas[nome_classe.strip()] = int(qtd)
+        resultado, categorias = _parse_definicao_vagas(self.vagas_input.value)
+        if resultado is None:
+            return await interaction.response.send_message(categorias, ephemeral=True)
+        definicao_vagas = resultado
 
         erro = _validar_definicao_vagas(definicao_vagas)
         if erro:
@@ -993,6 +964,7 @@ class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
         self.painel.conteudo = conteudo
         self.painel.descricao = descricao
         self.painel.max_vagas = definicao_vagas
+        self.painel.categoria_da_classe = categorias
 
         novas_classes = set(definicao_vagas.keys())
         antigas_classes = set(self.painel.jogadores.keys())
@@ -1013,6 +985,7 @@ class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
                     evento["conteudo"] = conteudo
                     evento["descricao"] = descricao
                     evento["max_vagas"] = dict(self.painel.max_vagas)
+                    evento["categoria_da_classe"] = dict(self.painel.categoria_da_classe)
                     evento["jogadores"] = dict(self.painel.jogadores)
                     evento["fila_espera"] = dict(self.painel.fila_espera)
                     break
@@ -1161,8 +1134,8 @@ class ItemMenuTemplate(discord.ui.Select):
             return await interaction.response.edit_message(content="❌ Esse template não existe mais.", embed=None, view=None)
 
         embed = discord.Embed(title=f"🛡️ {escolha}", color=discord.Color.blurple())
-        vagas_str = ", ".join(f"{c}:{q}" for c, q in template["vagas"].items())
-        embed.add_field(name="Vagas", value=vagas_str, inline=False)
+        vagas_str = _texto_vagas_para_edicao(template["vagas"], template.get("categoria_da_classe"))
+        embed.add_field(name="Vagas", value=_truncar_texto(vagas_str, 1000), inline=False)
         if template.get("descricao"):
             embed.add_field(name="Descrição", value=template["descricao"], inline=False)
 
@@ -1224,7 +1197,7 @@ class ModalEditarTemplate(discord.ui.Modal, title="✏️ Editar Template"):
         self.cog = cog
         self.nome_original = nome_template
 
-        vagas_str = "\n".join(f"{c}:{q}" for c, q in template["vagas"].items())
+        vagas_str = _texto_vagas_para_edicao(template["vagas"], template.get("categoria_da_classe"))
 
         self.nome_input = discord.ui.TextInput(
             label="Nome do Template",
@@ -1254,22 +1227,10 @@ class ModalEditarTemplate(discord.ui.Modal, title="✏️ Editar Template"):
         novo_nome = self.nome_input.value.strip()
         descricao = self.descricao_input.value.strip() or None
 
-        definicao_vagas = {}
-        for linha in self.vagas_input.value.splitlines():
-            linha_limpa = linha.strip().rstrip(',').strip()
-            if not linha_limpa:
-                continue
-            if ":" not in linha_limpa:
-                return await interaction.response.send_message(
-                    f"❌ Formato inválido em `{linha_limpa}`. Use `Classe:Qtd`.", ephemeral=True
-                )
-            nome_classe, qtd = linha_limpa.split(":", 1)
-            qtd = qtd.strip()
-            if not qtd.isdigit():
-                return await interaction.response.send_message(
-                    f"❌ Quantidade inválida em `{linha_limpa}`. Use um número.", ephemeral=True
-                )
-            definicao_vagas[nome_classe.strip()] = int(qtd)
+        resultado, categorias = _parse_definicao_vagas(self.vagas_input.value)
+        if resultado is None:
+            return await interaction.response.send_message(categorias, ephemeral=True)
+        definicao_vagas = resultado
 
         erro = _validar_definicao_vagas(definicao_vagas)
         if erro:
@@ -1283,6 +1244,7 @@ class ModalEditarTemplate(discord.ui.Modal, title="✏️ Editar Template"):
 
         self.cog.templates[novo_nome] = {
             "vagas": definicao_vagas,
+            "categoria_da_classe": categorias,
             "descricao": descricao,
             "criador_id": criador_id
         }
@@ -1352,6 +1314,7 @@ class ModalUsarTemplate(discord.ui.Modal, title="🎮 Criar Conteúdo (Template)
             self.template.get("descricao"),
             horario_input,
             foods,
+            dict(self.template.get("categoria_da_classe") or {c: CATEGORIA_PADRAO for c in self.template["vagas"]}),
         )
 
 
@@ -1385,30 +1348,21 @@ class ModalCriarTemplate(discord.ui.Modal, title="📋 Criar Template"):
         nome = self.nome_template.value.strip()
         descricao = self.descricao_texto.value.strip() or None
 
-        definicao_vagas = {}
-        for linha in self.vagas_texto.value.splitlines():
-            linha_limpa = linha.strip().rstrip(',').strip()
-            if not linha_limpa:
-                continue
-            if ":" not in linha_limpa:
-                return await interaction.response.send_message(
-                    f"❌ Formato inválido em `{linha_limpa}`. Use `Classe:Qtd`, ex: `Tank:2`.",
-                    ephemeral=True
-                )
-            nome_classe, qtd = linha_limpa.split(":", 1)
-            qtd = qtd.strip()
-            if not qtd.isdigit():
-                return await interaction.response.send_message(
-                    f"❌ Quantidade inválida em `{linha_limpa}`. Use um número, ex: `Tank:2`.",
-                    ephemeral=True
-                )
-            definicao_vagas[nome_classe.strip()] = int(qtd)
+        resultado, categorias = _parse_definicao_vagas(self.vagas_texto.value)
+        if resultado is None:
+            return await interaction.response.send_message(categorias, ephemeral=True)
+        definicao_vagas = resultado
 
         erro = _validar_definicao_vagas(definicao_vagas)
         if erro:
             return await interaction.response.send_message(erro, ephemeral=True)
 
-        self.cog.templates[nome] = {"vagas": definicao_vagas, "descricao": descricao, "criador_id": interaction.user.id}
+        self.cog.templates[nome] = {
+            "vagas": definicao_vagas,
+            "categoria_da_classe": categorias,
+            "descricao": descricao,
+            "criador_id": interaction.user.id,
+        }
         await salvar_templates(self.cog.templates)
 
         await interaction.response.send_message(f"✅ Template **{nome}** salvo com sucesso! Já aparece no `/content`.", ephemeral=True)
@@ -1461,24 +1415,10 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
         conteudo = self.titulo.value.strip()
         descricao = self.descricao_texto.value.strip() or None
 
-        definicao_vagas = {}
-        for linha in self.vagas_texto.value.splitlines():
-            linha_limpa = linha.strip().rstrip(',').strip()
-            if not linha_limpa:
-                continue
-            if ":" not in linha_limpa:
-                return await interaction.response.send_message(
-                    f"❌ Formato inválido em `{linha_limpa}`. Use `Classe:Qtd`, ex: `Tank:2`.",
-                    ephemeral=True
-                )
-            nome_classe, qtd = linha_limpa.split(":", 1)
-            qtd = qtd.strip()
-            if not qtd.isdigit():
-                return await interaction.response.send_message(
-                    f"❌ Quantidade inválida em `{linha_limpa}`. Use um número, ex: `Tank:2`.",
-                    ephemeral=True
-                )
-            definicao_vagas[nome_classe.strip()] = int(qtd)
+        resultado, categorias = _parse_definicao_vagas(self.vagas_texto.value)
+        if resultado is None:
+            return await interaction.response.send_message(categorias, ephemeral=True)
+        definicao_vagas = resultado
 
         erro = _validar_definicao_vagas(definicao_vagas)
         if erro:
@@ -1502,7 +1442,7 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
                 "❌ Foods deve ser entre 1 e 20.", ephemeral=True
             )
 
-        await self.cog.publicar_painel(interaction, conteudo, definicao_vagas, descricao, horario_input, foods)
+        await self.cog.publicar_painel(interaction, conteudo, definicao_vagas, descricao, horario_input, foods, categorias)
 
 
 # ==========================================
@@ -1604,6 +1544,7 @@ class LFG(commands.Cog):
                 foods=evento.get("foods", 1),
                 message_id=message_id_str,
                 jump_url=evento.get("jump_url"),
+                categoria_da_classe=evento.get("categoria_da_classe"),
             )
             painel.status = evento.get("status", "formando")
             painel.jogadores = evento.get("jogadores", {c: [] for c in max_vagas})
@@ -1896,8 +1837,8 @@ class LFG(commands.Cog):
                 if extra > 0:
                     embed.add_field(name="ℹ️", value=f"E mais **{extra}** templates... Use `/template` para gerenciar.", inline=False)
                 break
-            vagas_str = ", ".join(f"{c}:{q}" for c, q in dados["vagas"].items())
-            valor = vagas_str
+            vagas_str = _texto_vagas_para_edicao(dados["vagas"], dados.get("categoria_da_classe"))
+            valor = _truncar_texto(vagas_str, 1000)
             if dados.get("descricao"):
                 valor += f"\n*{dados['descricao']}*"
             embed.add_field(name=f"🛡️ {nome}", value=valor, inline=False)
@@ -2031,11 +1972,14 @@ class LFG(commands.Cog):
                         self._iniciar_timer_vazio(call_id)
                 break
 
-    async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, foods=1):
+    async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, foods=1, categoria_da_classe=None):
         """Cria e posta o painel de vagas — usado tanto pelo fluxo 'do zero' quanto por template."""
         erro = _validar_definicao_vagas(definicao_vagas)
         if erro:
             return await interaction.response.send_message(erro, ephemeral=True)
+
+        if categoria_da_classe is None:
+            categoria_da_classe = {c: CATEGORIA_PADRAO for c in definicao_vagas}
 
         unix_timestamp = interpretar_horario(horario_input) if horario_input else None
 
@@ -2060,7 +2004,7 @@ class LFG(commands.Cog):
         if call_id:
             self._iniciar_timer_vazio(call_id)
 
-        painel = PainelVagas(conteudo, definicao_vagas, interaction.user.id, unix_timestamp, descricao, call_id, foods)
+        painel = PainelVagas(conteudo, definicao_vagas, interaction.user.id, unix_timestamp, descricao, call_id, foods, categoria_da_classe=categoria_da_classe)
         embed_inicial = painel.gerar_embed()
 
         id_cargo_membro = CARGOS.get("DIE HARD")
@@ -2090,6 +2034,7 @@ class LFG(commands.Cog):
             "foods": foods,
             "descricao": descricao,
             "max_vagas": definicao_vagas,
+            "categoria_da_classe": dict(categoria_da_classe),
             "jogadores": {classe: [] for classe in definicao_vagas},
             "fila_espera": {classe: [] for classe in definicao_vagas},
         })

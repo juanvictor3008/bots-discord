@@ -22,6 +22,41 @@ DIAS_SEMANA = {
 TEMPLATES_PATH = "data/templates.json"
 EVENTOS_PATH = "data/eventos.json"
 
+MAX_VAGAS_TOTAL = 40
+
+
+def _validar_definicao_vagas(definicao_vagas):
+    """Valida a composição de vagas. Retorna mensagem de erro ou None."""
+    if not definicao_vagas:
+        return "Você precisa adicionar pelo menos uma vaga."
+    try:
+        total = sum(int(q) for q in definicao_vagas.values())
+    except (TypeError, ValueError):
+        return "Quantidade de vagas inválida. Use números, ex: `Tank:2`."
+    if total > MAX_VAGAS_TOTAL:
+        return (
+            f"❌ A composição tem **{total}** vagas, mas o limite é "
+            f"**{MAX_VAGAS_TOTAL}** pessoas por conteúdo. Reduza a quantidade de vagas."
+        )
+    return None
+
+
+def _truncar_texto(texto, limite):
+    """Corta o texto no limite aproximado de caracteres mantendo linhas inteiras."""
+    if len(texto) <= limite:
+        return texto
+    cortado = []
+    comprimento = 0
+    resto = 0
+    for p in texto.splitlines():
+        if comprimento + len(p) + 1 > limite:
+            resto += 1
+            continue
+        cortado.append(p)
+        comprimento += len(p) + 1
+    sufixo = f"\n… (+{resto} linhas)" if resto else "\n…"
+    return "\n".join(cortado) + sufixo
+
 def _usando_mongo():
     return MONGO_URI is not None and colecao_templates is not None
 
@@ -272,44 +307,52 @@ def _extrair_message_id(jump_url):
 class SelectClasses(discord.ui.Select):
     def __init__(self, view_pai):
         self.view_pai = view_pai
-        opcoes = []
-        for classe, vagas_totais in view_pai.max_vagas.items():
-            inscritos = view_pai.jogadores.get(classe, [])
-            texto = f"{len(inscritos)}/{vagas_totais} inscritos"
-            opcoes.append(discord.SelectOption(label=classe[:100], value=classe, description=texto))
+        opcoes, pagina, total = view_pai._montar_opcoes_classes(0)
+        self.pagina = pagina
+        placeholder = "Escolha uma classe para entrar..."
+        if total > 1:
+            placeholder = f"Escolha uma classe ({pagina + 1}/{total})..."
         super().__init__(
-            placeholder="Escolha uma classe para entrar...",
-            options=opcoes[:25],
+            placeholder=placeholder,
+            options=opcoes,
             row=0,
         )
 
     async def callback(self, interaction: discord.Interaction):
-        classe = self.values[0]
-        await self.view_pai.processar_clique(interaction, classe)
+        escolha = self.values[0]
+        if escolha == "__prev__":
+            self.view_pai._atualizar_select(self.pagina - 1)
+            return await interaction.response.edit_message(view=self.view_pai)
+        if escolha == "__next__":
+            self.view_pai._atualizar_select(self.pagina + 1)
+            return await interaction.response.edit_message(view=self.view_pai)
+        await self.view_pai.processar_clique(interaction, escolha)
 
 
 class SelectGerenciarVagas(discord.ui.Select):
     """Select para líder/staff remover inscritos do painel."""
     def __init__(self, view_pai):
         self.view_pai = view_pai
-        opcoes = []
-        for classe, lista in view_pai.jogadores.items():
-            for jogador in lista:
-                label = f"{classe} - {jogador}"
-                opcoes.append(discord.SelectOption(label=label[:100], value=f"{classe}|||{jogador}", description=f"Remover {jogador} de {classe}"))
-        for classe, lista in view_pai.fila_espera.items():
-            for jogador in lista:
-                label = f"{classe} - {jogador} (Fila)"
-                opcoes.append(discord.SelectOption(label=label[:100], value=f"fila|||{classe}|||{jogador}", description=f"Remover {jogador} da fila de {classe}"))
-        if not opcoes:
-            opcoes.append(discord.SelectOption(label="Nenhum inscrito", value="__vazio__", description="Não há jogadores para remover"))
+        opcoes, pagina, total = view_pai._montar_opcoes_gerenciar(0)
+        self.pagina = pagina
+        placeholder = "Selecione um jogador para remover..."
+        if total > 1:
+            placeholder = f"Remover jogador ({pagina + 1}/{total})..."
         super().__init__(
-            placeholder="Selecione um jogador para remover...",
-            options=opcoes[:25],
+            placeholder=placeholder,
+            options=opcoes,
         )
 
     async def callback(self, interaction: discord.Interaction):
         valor = self.values[0]
+        if valor in ("__prev__", "__next__"):
+            alvo = self.pagina + (1 if valor == "__next__" else -1)
+            opcoes, pagina, total = self.view_pai._montar_opcoes_gerenciar(alvo)
+            self.pagina = pagina
+            self.options = opcoes
+            if total > 1:
+                self.placeholder = f"Remover jogador ({pagina + 1}/{total})..."
+            return await interaction.response.edit_message(view=self.view)
         if valor == "__vazio__":
             return await interaction.response.send_message("Nenhum inscrito para remover.", ephemeral=True)
 
@@ -447,13 +490,69 @@ class PainelVagas(discord.ui.View):
         elif novo_status == "em_andamento":
             self.botao_iniciar.disabled = True
 
-    def _atualizar_select(self):
-        novas_opcoes = []
-        for classe, vagas_totais in self.max_vagas.items():
+    def _montar_opcoes_classes(self, pagina=0):
+        """Monta as opções do select de classes, paginando quando passa de 25."""
+        classes = list(self.max_vagas.items())
+        if len(classes) <= 25:
+            paginas = [classes]
+        else:
+            paginas = [classes[i:i + 23] for i in range(0, len(classes), 23)]
+        total = len(paginas)
+        pagina = max(0, min(pagina, total - 1))
+        itens = paginas[pagina]
+        opcoes = []
+        if total > 1:
+            if pagina > 0:
+                opcoes.append(discord.SelectOption(label="⬅️ Página Anterior", value="__prev__"))
+            if pagina < total - 1:
+                opcoes.append(discord.SelectOption(label="Próxima Página ➡️", value="__next__"))
+        espaco = 25 - len(opcoes)
+        for classe, vagas_totais in itens[:espaco]:
             inscritos = self.jogadores.get(classe, [])
             texto = f"{len(inscritos)}/{vagas_totais} inscritos"
-            novas_opcoes.append(discord.SelectOption(label=classe[:100], value=classe, description=texto))
-        self.select_classes.options = novas_opcoes[:25]
+            opcoes.append(discord.SelectOption(label=classe[:100], value=classe, description=texto))
+        return opcoes, pagina, total
+
+    def _montar_opcoes_gerenciar(self, pagina=0):
+        """Monta as opções do select de gerenciamento, paginando quando passa de 25."""
+        opcoes_todas = []
+        for classe, lista in self.jogadores.items():
+            for jogador in lista:
+                label = f"{classe} - {jogador}"
+                opcoes_todas.append(discord.SelectOption(label=label[:100], value=f"{classe}|||{jogador}", description=f"Remover {jogador} de {classe}"))
+        for classe, lista in self.fila_espera.items():
+            for jogador in lista:
+                label = f"{classe} - {jogador} (Fila)"
+                opcoes_todas.append(discord.SelectOption(label=label[:100], value=f"fila|||{classe}|||{jogador}", description=f"Remover {jogador} da fila de {classe}"))
+        if not opcoes_todas:
+            return [discord.SelectOption(label="Nenhum inscrito", value="__vazio__", description="Não há jogadores para remover")], 0, 1
+        if len(opcoes_todas) <= 25:
+            paginas = [opcoes_todas]
+        else:
+            paginas = [opcoes_todas[i:i + 23] for i in range(0, len(opcoes_todas), 23)]
+        total = len(paginas)
+        pagina = max(0, min(pagina, total - 1))
+        itens = paginas[pagina]
+        opcoes = []
+        if total > 1:
+            if pagina > 0:
+                opcoes.append(discord.SelectOption(label="⬅️ Página Anterior", value="__prev__"))
+            if pagina < total - 1:
+                opcoes.append(discord.SelectOption(label="Próxima Página ➡️", value="__next__"))
+        espaco = 25 - len(opcoes)
+        opcoes.extend(itens[:espaco])
+        return opcoes, pagina, total
+
+    def _atualizar_select(self, pagina=None):
+        if pagina is None:
+            pagina = getattr(self.select_classes, "pagina", 0)
+        opcoes, pagina, total = self._montar_opcoes_classes(pagina)
+        self.select_classes.options = opcoes
+        self.select_classes.pagina = pagina
+        if total > 1:
+            self.select_classes.placeholder = f"Escolha uma classe ({pagina + 1}/{total})..."
+        else:
+            self.select_classes.placeholder = "Escolha uma classe para entrar..."
 
     def _aplicar_custom_ids(self):
         prefix = f"pnl_{self.message_id or 'new'}"
@@ -477,6 +576,49 @@ class PainelVagas(discord.ui.View):
                         evento["call_id"] = self.call_id
                     break
             await salvar_eventos(lfg_cog.eventos_ativos)
+
+    def _campos_vagas(self):
+        """Monta os campos do embed agrupando classes para não estourar 25 fields."""
+        campos = []
+        bloco = []
+        tamanho_bloco = 0
+        limite_caracteres = 900
+
+        for classe, vagas_totais in self.max_vagas.items():
+            inscritos = self.jogadores.get(classe, [])
+            reserva = self.fila_espera.get(classe, [])
+            texto_jogadores = "\n".join(inscritos) if inscritos else "*Vazio*"
+
+            if reserva:
+                texto_reserva = "\n".join([f"⏳ *{r} (Fila)*" for r in reserva])
+                texto_final = f"{texto_jogadores}\n\n**⏱️ Fila:**\n{texto_reserva}"
+            else:
+                texto_final = texto_jogadores
+
+            texto_final = _truncar_texto(texto_final, 850)
+            nome = f"🛡️ {classe} ({len(inscritos)}/{vagas_totais})"
+            item = (nome, texto_final)
+
+            if bloco and (len(bloco) >= 2 or tamanho_bloco + len(nome) + len(texto_final) > limite_caracteres):
+                campos.append(bloco)
+                bloco = []
+                tamanho_bloco = 0
+            bloco.append(item)
+            tamanho_bloco += len(nome) + len(texto_final)
+
+        if bloco:
+            campos.append(bloco)
+
+        resultado = []
+        for bloco_field in campos[:25]:
+            if len(bloco_field) == 1:
+                nome_unico, valor = bloco_field[0]
+                resultado.append((nome_unico[:256], valor))
+            else:
+                nomes = " + ".join(n.replace("🛡️ ", "", 1).split(" (")[0] for n, _ in bloco_field)
+                valor = "\n\n".join(f"**{n}**\n{v}" for n, v in bloco_field)
+                resultado.append((f"🛡️ {nomes}"[:100], valor))
+        return resultado
 
     def gerar_embed(self):
         titulo_destaque = f"💥 {self.conteudo.upper()} 💥"
@@ -509,27 +651,23 @@ class PainelVagas(discord.ui.View):
             color=cor_embed
         )
 
-        campos = 0
-        for classe, vagas_totais in self.max_vagas.items():
-            if campos >= 25:
-                break
-            inscritos = self.jogadores[classe]
-            reserva = self.fila_espera[classe]
-            texto_jogadores = "\n".join(inscritos) if inscritos else "*Vazio*"
-
-            if reserva:
-                texto_reserva = "\n".join([f"⏳ *{r} (Fila)*" for r in reserva])
-                texto_final = f"{texto_jogadores}\n\n**⏱️ Fila:**\n{texto_reserva}"
-            else:
-                texto_final = texto_jogadores
-
-            embed.add_field(name=f"🛡️ {classe} ({len(inscritos)}/{vagas_totais})", value=texto_final, inline=True)
-            campos += 1
-
         if self.status == "encerrado":
             embed.set_footer(text="Esta PT foi encerrada pelo líder e não aceita mais inscrições.")
         else:
             embed.set_footer(text="Clique nos botões abaixo para entrar ou sair da fila.")
+
+        campos = self._campos_vagas()
+        base = len(embed.title or "") + len(embed.description or "") + len(embed.footer.text or "")
+        orcamento = 6000 - base
+        for nome_field, valor_field in campos:
+            if orcamento <= 0:
+                break
+            if len(valor_field) > orcamento:
+                valor_field = _truncar_texto(valor_field, max(50, orcamento - 25))
+                if len(valor_field) > orcamento:
+                    valor_field = valor_field[:orcamento]
+            orcamento -= len(nome_field) + len(valor_field)
+            embed.add_field(name=nome_field, value=valor_field, inline=False)
 
         return embed
 
@@ -740,10 +878,9 @@ class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
                 )
             definicao_vagas[nome_classe.strip()] = int(qtd)
 
-        if not definicao_vagas:
-            return await interaction.response.send_message(
-                "❌ Você precisa adicionar pelo menos uma vaga.", ephemeral=True
-            )
+        erro = _validar_definicao_vagas(definicao_vagas)
+        if erro:
+            return await interaction.response.send_message(erro, ephemeral=True)
 
         antigo_conteudo = self.painel.conteudo
         self.painel.conteudo = conteudo
@@ -760,12 +897,7 @@ class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
             self.painel.jogadores[classe] = []
             self.painel.fila_espera[classe] = []
 
-        novas_opcoes = []
-        for classe, vagas_totais in definicao_vagas.items():
-            inscritos = self.painel.jogadores.get(classe, [])
-            texto = f"{len(inscritos)}/{vagas_totais} inscritos"
-            novas_opcoes.append(discord.SelectOption(label=classe[:100], value=classe, description=texto))
-        self.painel.select_classes.options = novas_opcoes[:25]
+        self.painel._atualizar_select(0)
 
         lfg_cog = interaction.client.get_cog("LFG")
         if lfg_cog:
@@ -798,13 +930,46 @@ class ItemSelecionarTemplate(discord.ui.Select):
     """Usado pelo /content: escolhe um template pra criar o painel, ou vai criar do zero."""
     def __init__(self, cog: "LFG"):
         self.cog = cog
-        opcoes = [discord.SelectOption(label="🆕 Criar do zero", value="__novo__", emoji="🆕")]
-        for nome in cog.templates.keys():
+        self.pagina = 0
+        self._reconstruir_opcoes(0)
+
+    def _reconstruir_opcoes(self, pagina):
+        nomes = list(self.cog.templates.keys())
+        fixos = 1  # opção "🆕 Criar do zero"
+        if len(nomes) + fixos <= 25:
+            paginas = [nomes]
+        else:
+            paginas = [nomes[i:i + 22] for i in range(0, len(nomes), 22)]
+        total = len(paginas)
+        self.pagina = max(0, min(pagina, total - 1))
+        itens = paginas[self.pagina]
+
+        opcoes = []
+        if self.pagina == 0:
+            opcoes.append(discord.SelectOption(label="🆕 Criar do zero", value="__novo__", emoji="🆕"))
+        if total > 1:
+            if self.pagina > 0:
+                opcoes.append(discord.SelectOption(label="⬅️ Página Anterior", value="__prev__"))
+            if self.pagina < total - 1:
+                opcoes.append(discord.SelectOption(label="Próxima Página ➡️", value="__next__"))
+        espaco = 25 - len(opcoes)
+        for nome in itens[:espaco]:
             opcoes.append(discord.SelectOption(label=nome[:100], value=nome))
-        super().__init__(placeholder="Escolha um template ou crie do zero...", options=opcoes[:25])
+
+        if total > 1:
+            self.placeholder = f"Escolha um template ({self.pagina + 1}/{total})..."
+        else:
+            self.placeholder = "Escolha um template ou crie do zero..."
+        self.options = opcoes
 
     async def callback(self, interaction: discord.Interaction):
         escolha = self.values[0]
+        if escolha == "__prev__":
+            self._reconstruir_opcoes(self.pagina - 1)
+            return await interaction.response.edit_message(view=self.view)
+        if escolha == "__next__":
+            self._reconstruir_opcoes(self.pagina + 1)
+            return await interaction.response.edit_message(view=self.view)
         if escolha == "__novo__":
             await interaction.response.send_modal(ModalCriarConteudo(self.cog))
             return
@@ -828,16 +993,48 @@ class ItemMenuTemplate(discord.ui.Select):
     """Usado pelo /template: menu de gerenciamento (criar, listar, remover)."""
     def __init__(self, cog: "LFG"):
         self.cog = cog
-        opcoes = [
-            discord.SelectOption(label="➕ Criar novo template", value="__criar__", emoji="➕"),
-            discord.SelectOption(label="📋 Listar todos os templates", value="__listar__", emoji="📋"),
-        ]
-        for nome in cog.templates.keys():
+        self.pagina = 0
+        self._reconstruir_opcoes(0)
+
+    def _reconstruir_opcoes(self, pagina):
+        nomes = list(self.cog.templates.keys())
+        fixos = 2  # opções "criar" e "listar"
+        if len(nomes) + fixos <= 25:
+            paginas = [nomes]
+        else:
+            paginas = [nomes[i:i + 21] for i in range(0, len(nomes), 21)]
+        total = len(paginas)
+        self.pagina = max(0, min(pagina, total - 1))
+        itens = paginas[self.pagina]
+
+        opcoes = []
+        if self.pagina == 0:
+            opcoes.append(discord.SelectOption(label="➕ Criar novo template", value="__criar__", emoji="➕"))
+            opcoes.append(discord.SelectOption(label="📋 Listar todos os templates", value="__listar__", emoji="📋"))
+        if total > 1:
+            if self.pagina > 0:
+                opcoes.append(discord.SelectOption(label="⬅️ Página Anterior", value="__prev__"))
+            if self.pagina < total - 1:
+                opcoes.append(discord.SelectOption(label="Próxima Página ➡️", value="__next__"))
+        espaco = 25 - len(opcoes)
+        for nome in itens[:espaco]:
             opcoes.append(discord.SelectOption(label=f"⚙️ Gerenciar: {nome}"[:100], value=nome))
-        super().__init__(placeholder="O que você quer fazer?", options=opcoes[:25])
+
+        if total > 1:
+            self.placeholder = f"O que você quer fazer? ({self.pagina + 1}/{total})"
+        else:
+            self.placeholder = "O que você quer fazer?"
+        self.options = opcoes
 
     async def callback(self, interaction: discord.Interaction):
         escolha = self.values[0]
+
+        if escolha == "__prev__":
+            self._reconstruir_opcoes(self.pagina - 1)
+            return await interaction.response.edit_message(view=self.view)
+        if escolha == "__next__":
+            self._reconstruir_opcoes(self.pagina + 1)
+            return await interaction.response.edit_message(view=self.view)
 
         if escolha == "__criar__":
             return await interaction.response.send_modal(ModalCriarTemplate(self.cog))
@@ -961,10 +1158,9 @@ class ModalEditarTemplate(discord.ui.Modal, title="✏️ Editar Template"):
                 )
             definicao_vagas[nome_classe.strip()] = int(qtd)
 
-        if not definicao_vagas:
-            return await interaction.response.send_message(
-                "❌ Você precisa adicionar pelo menos uma vaga.", ephemeral=True
-            )
+        erro = _validar_definicao_vagas(definicao_vagas)
+        if erro:
+            return await interaction.response.send_message(erro, ephemeral=True)
 
         template_antigo = self.cog.templates.get(self.nome_original)
         criador_id = template_antigo.get("criador_id") if template_antigo else interaction.user.id
@@ -1095,10 +1291,9 @@ class ModalCriarTemplate(discord.ui.Modal, title="📋 Criar Template"):
                 )
             definicao_vagas[nome_classe.strip()] = int(qtd)
 
-        if not definicao_vagas:
-            return await interaction.response.send_message(
-                "❌ Você precisa adicionar pelo menos uma vaga (ex: `Tank:2`).", ephemeral=True
-            )
+        erro = _validar_definicao_vagas(definicao_vagas)
+        if erro:
+            return await interaction.response.send_message(erro, ephemeral=True)
 
         self.cog.templates[nome] = {"vagas": definicao_vagas, "descricao": descricao, "criador_id": interaction.user.id}
         await salvar_templates(self.cog.templates)
@@ -1172,10 +1367,9 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
                 )
             definicao_vagas[nome_classe.strip()] = int(qtd)
 
-        if not definicao_vagas:
-            return await interaction.response.send_message(
-                "❌ Você precisa adicionar pelo menos uma vaga (ex: `Tank:2`).", ephemeral=True
-            )
+        erro = _validar_definicao_vagas(definicao_vagas)
+        if erro:
+            return await interaction.response.send_message(erro, ephemeral=True)
 
         horario_input = self.horario_texto.value.strip()
         if horario_input and not eh_texto_de_horario(horario_input):
@@ -1583,7 +1777,12 @@ class LFG(commands.Cog):
         if not self.templates:
             embed.description = "Nenhum template salvo ainda."
             return embed
-        for nome, dados in self.templates.items():
+        for i, (nome, dados) in enumerate(self.templates.items()):
+            if i >= 24:
+                extra = len(self.templates) - 24
+                if extra > 0:
+                    embed.add_field(name="ℹ️", value=f"E mais **{extra}** templates... Use `/template` para gerenciar.", inline=False)
+                break
             vagas_str = ", ".join(f"{c}:{q}" for c, q in dados["vagas"].items())
             valor = vagas_str
             if dados.get("descricao"):
@@ -1721,6 +1920,10 @@ class LFG(commands.Cog):
 
     async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, foods=1):
         """Cria e posta o painel de vagas — usado tanto pelo fluxo 'do zero' quanto por template."""
+        erro = _validar_definicao_vagas(definicao_vagas)
+        if erro:
+            return await interaction.response.send_message(erro, ephemeral=True)
+
         unix_timestamp = interpretar_horario(horario_input) if horario_input else None
 
         if unix_timestamp is None and _lider_de_outra_pt_imediata(self.eventos_ativos, interaction.user.id):

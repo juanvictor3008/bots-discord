@@ -895,11 +895,18 @@ class PainelVagas(discord.ui.View):
         lfg_cog = interaction.client.get_cog("LFG")
         resultados = {}
         participantes_reais = 0
+        processou = False
         if lfg_cog:
-            resultados, participantes_reais = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
+            resultados, participantes_reais, processou = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
 
+        # Sempre re-renderiza o embed com o status final, mesmo se outra chamada já processou.
         await interaction.edit_original_response(embed=self.gerar_embed(), view=self)
         asyncio.create_task(_deletar_painel_apos_delay(interaction.message, 300))
+
+        if not processou:
+            print(f"⚠️ encerrar_callback: encerramento já processado por outra chamada, pulando mensagens de sucesso")
+            return
+
         await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!", delete_after=30)
 
         if self.call_id and not resultados:
@@ -1661,33 +1668,40 @@ class LFG(commands.Cog):
         return resultados, participantes_reais
 
     async def _encerrar_conteudo(self, painel, guilda, jump_url=None):
-        """Método centralizado de encerramento. Usado tanto pelo botão manual quanto pelo auto."""
+        """Método centralizado de encerramento. Usado tanto pelo botão manual quanto pelo auto.
+
+        Retorna (resultados, participantes_reais, processou) — processou=True apenas quando
+        ESTA chamada foi quem realmente processou o encerramento (ganhou a trava atômica e
+        executou a limpeza). Quando a trava detecta duplicidade, a função retorna {}, 0, False
+        mas já deixa o painel em memória com status "encerrado".
+        """
         print(f"🛑 _encerrar_conteudo chamado: conteudo={painel.conteudo}, call_id={painel.call_id}, jump_url={painel.jump_url}")
+
+        # Sincroniza o painel em memória SEMPRE, antes de qualquer verificação de trava,
+        # pra que qualquer caller re-renderize o embed já com status final e botões desabilitados.
+        painel._definir_status("encerrado")
 
         evento = None
         if painel.jump_url:
             evento = next((e for e in self.eventos_ativos
-                          if e.get("jump_url") == painel.jump_url
-                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
+                          if e.get("jump_url") == painel.jump_url), None)
         if not evento and painel.call_id:
             evento = next((e for e in self.eventos_ativos
-                          if e.get("call_id") == painel.call_id
-                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
+                          if e.get("call_id") == painel.call_id), None)
         if not evento and jump_url:
             evento = next((e for e in self.eventos_ativos
-                          if e.get("jump_url") == jump_url
-                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
+                          if e.get("jump_url") == jump_url), None)
         if not evento:
             evento = next((e for e in self.eventos_ativos
                           if e.get("conteudo") == painel.conteudo
-                          and e.get("autor_id") == painel.autor_id
-                          and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
+                          and e.get("autor_id") == painel.autor_id), None)
+
+        if evento and evento.get("status") in ("encerrando", "encerrado"):
+            # Outra chamada já processou (em memória). Só sincroniza o painel.
+            print(f"⚠️ _encerrar_conteudo: evento já em estado terminal ({evento['status']}), ignorando chamada duplicada")
+            return {}, 0, False
 
         if evento:
-            if evento.get("status") in ("encerrando", "encerrado"):
-                print(f"⚠️ _encerrar_conteudo: evento já em estado terminal ({evento['status']}), ignorando chamada duplicada")
-                return {}, 0
-
             if _usando_mongo():
                 filtro = {}
                 if evento.get("jump_url"):
@@ -1699,14 +1713,13 @@ class LFG(commands.Cog):
                     resultado = await colecao_eventos.find_one_and_update(filtro, {"$set": {"status": "encerrando"}})
                     if resultado is None:
                         print(f"⚠️ _encerrar_conteudo: encerramento já em andamento ou concluído no Mongo, ignorando")
-                        return {}, 0
+                        return {}, 0, False
 
             evento["status"] = "encerrando"
 
         if not evento:
             await log_discord(self.bot, f"Encerramento de **{painel.conteudo}** (call {painel.call_id}) não encontrou evento correspondente em `eventos_ativos`.", "aviso")
         print(f"🛑 Evento encontrado: {evento is not None} (status={evento.get('status') if evento else 'N/A'})")
-        painel._definir_status("encerrado")
 
         if painel.call_id:
             self._cancelar_timer_vazio(painel.call_id)
@@ -1740,7 +1753,7 @@ class LFG(commands.Cog):
         if evento:
             evento["status"] = "encerrado"
         await salvar_eventos(self.eventos_ativos)
-        return resultados, participantes_reais
+        return resultados, participantes_reais, True
 
     async def _auto_encerrar(self, call_id):
         print(f"🔁 _auto_encerrar iniciado para call_id={call_id} (tipo={type(call_id).__name__})")
@@ -1782,33 +1795,37 @@ class LFG(commands.Cog):
             return
 
         print(f"✅ _auto_encerrando: call_id={call_id}, painel.msg_id={msg_id}, conteudo={painel.conteudo}")
-        await log_discord(self.bot, f"Auto-encerramento do conteúdo **{painel.conteudo}** (call {call_id} vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min)", "info")
-        resultados, participantes_reais = await self._encerrar_conteudo(painel, guilda)
+        resultados, participantes_reais, processou = await self._encerrar_conteudo(painel, guilda)
+
+        if processou:
+            await log_discord(self.bot, f"Auto-encerramento do conteúdo **{painel.conteudo}** (call {call_id} vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min)", "info")
 
         if msg_id:
             encontrou = False
             for ch in guilda.text_channels:
                 try:
                     msg = await ch.fetch_message(msg_id)
+                    # Sempre re-renderiza o embed final, mesmo se outra chamada já processou.
                     await msg.edit(embed=painel.gerar_embed(), view=painel)
                     asyncio.create_task(_deletar_painel_apos_delay(msg, 300))
-                    await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.", delete_after=30)
-                    if not resultados:
-                        await ch.send(
-                            f"⚠️ Conteúdo encerrado sem pontuação — mínimo de {MINIMO_JOGADORES_PONTOS} "
-                            f"jogadores não atingido (apenas {participantes_reais} participaram)."
-                        )
-                    else:
-                        linhas = []
-                        for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
-                            linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
-                        embed_pts = discord.Embed(
-                            title="🏆 Pontos do Conteúdo",
-                            description="\n".join(linhas),
-                            color=discord.Color.gold()
-                        )
-                        embed_pts.set_footer(text=f"Teto: {painel.teto_pontos} pts ({painel.foods} foods)")
-                        await ch.send(embed=embed_pts)
+                    if processou:
+                        await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.", delete_after=30)
+                        if not resultados:
+                            await ch.send(
+                                f"⚠️ Conteúdo encerrado sem pontuação — mínimo de {MINIMO_JOGADORES_PONTOS} "
+                                f"jogadores não atingido (apenas {participantes_reais} participaram)."
+                            )
+                        else:
+                            linhas = []
+                            for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
+                                linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
+                            embed_pts = discord.Embed(
+                                title="🏆 Pontos do Conteúdo",
+                                description="\n".join(linhas),
+                                color=discord.Color.gold()
+                            )
+                            embed_pts.set_footer(text=f"Teto: {painel.teto_pontos} pts ({painel.foods} foods)")
+                            await ch.send(embed=embed_pts)
                     encontrou = True
                     break
                 except Exception:
@@ -1816,15 +1833,16 @@ class LFG(commands.Cog):
             if not encontrou:
                 print(f"⚠️ _auto_encerrar: mensagem {msg_id} não encontrada em nenhum canal de texto")
                 await log_discord(self.bot, f"Mensagem do painel **{painel.conteudo}** (id {msg_id}) não encontrada em nenhum canal de texto durante auto-encerramento", "aviso")
-        autor = guilda.get_member(painel.autor_id)
-        if autor:
-            try:
-                await autor.send(
-                    f"⏳ Sua PT **{painel.conteudo}** foi encerrada automaticamente por call vazia "
-                    f"(inatividade de {self.TEMPO_TOLERANCIA_VAZIA // 60} min)."
-                )
-            except Exception:
-                pass
+        if processou:
+            autor = guilda.get_member(painel.autor_id)
+            if autor:
+                try:
+                    await autor.send(
+                        f"⏳ Sua PT **{painel.conteudo}** foi encerrada automaticamente por call vazia "
+                        f"(inatividade de {self.TEMPO_TOLERANCIA_VAZIA // 60} min)."
+                    )
+                except Exception:
+                    pass
 
     def montar_embed_templates(self):
         embed = discord.Embed(title="📋 Templates Salvos — Die Hard", color=discord.Color.blurple())

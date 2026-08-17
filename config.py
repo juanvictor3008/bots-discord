@@ -41,14 +41,8 @@ CARGOS = {
     "lider": 1519186611315933345,   
 }   
 
-# Configurações de Economia
-MINIMO_PESSOAS_CALL = 5
-PONTOS_POR_CICLO = 1
-MULTIPLICADOR_CALLER = 5
-LIMITE_ADICAO_POR_VEZ = 10
-MINIMO_JOGADORES_PONTOS = 5
-CARGOS_PERMITIDOS_ADICIONAR = ["lider", "SUB-LIDER", "caller", "caller novato"] 
-CARGOS_PERMITIDOS_REMOVER = ["lider", "SUB-LIDER"]
+# Configurações de Recrutamento
+CARGOS_PERMITIDOS_REGISTRAR = ["lider", "SUB-LIDER", "recrutador", "moderador"]
 
 # Configurações de Sorteio
 MINUTO_MINIMO_CALL_PADRAO = 60
@@ -67,19 +61,21 @@ if MONGO_URI:
         retryWrites=True,
     )
     db = mongo_client["guilda_bot"]
-    colecao_pontos = db["pontos"]
     colecao_sorteio_config = db["sorteio_config"]
     colecao_sorteio_inscritos = db["sorteio_inscritos"]
     colecao_tempo_call = db["tempo_call"]
     colecao_templates = db["templates"]
     colecao_eventos = db["eventos"]
     colecao_presencas = db["presencas"]
+    colecao_membros = db["membros"]
+    colecao_recruitment_points = db["recruitment_points"]
 else:
-    colecao_pontos = None
     colecao_sorteio_config = None
     colecao_sorteio_inscritos = None
     colecao_tempo_call = None
     colecao_templates = None
     colecao_eventos = None
     colecao_presencas = None
+    colecao_membros = None
+    colecao_recruitment_points = None
     print("⚠️ MONGO_URI não encontrada!")

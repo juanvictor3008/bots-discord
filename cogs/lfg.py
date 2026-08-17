@@ -7,8 +7,7 @@ from discord import app_commands
 from discord.ext import commands
 from datetime import datetime, timedelta, timezone
 
-from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_pontos, colecao_presencas, MINIMO_JOGADORES_PONTOS
-from cogs.economia import salvar_pontos
+from config import CARGOS, MONGO_URI, colecao_templates, colecao_eventos, CANAIS_GERADORES_IDS, colecao_presencas
 from utils import log_discord
 
 
@@ -226,6 +225,23 @@ async def carregar_eventos():
         except (json.JSONDecodeError, OSError):
             return []
     return []
+
+
+def _para_ts(valor):
+    """Converte encerrando_desde (float, datetime ou ISO str) em epoch float. None se inválido."""
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    if isinstance(valor, datetime):
+        return valor.timestamp()
+    if isinstance(valor, str):
+        try:
+            return datetime.fromisoformat(valor).timestamp()
+        except (ValueError, TypeError):
+            try:
+                return float(valor)
+            except (ValueError, TypeError):
+                return None
+    return None
 
 
 def _migrar_evento(evento):
@@ -541,7 +557,7 @@ class ModalPuxarMembro(discord.ui.Modal, title="👑 Puxar Membro para a PT"):
 
 
 class PainelVagas(discord.ui.View):
-    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None, foods=1, message_id=None, jump_url=None, categoria_da_classe=None):
+    def __init__(self, conteudo, definicao_vagas, autor_id, unix_timestamp=None, descricao=None, call_id=None, message_id=None, jump_url=None, categoria_da_classe=None):
         super().__init__(timeout=None)
         self.conteudo = conteudo
         self.max_vagas = definicao_vagas
@@ -550,8 +566,6 @@ class PainelVagas(discord.ui.View):
         self.unix_timestamp = unix_timestamp
         self.descricao = descricao
         self.call_id = call_id
-        self.foods = foods
-        self.teto_pontos = foods * 10
         self.message_id = message_id
         self.jump_url = jump_url
         self.jogadores = {classe: [] for classe in definicao_vagas}
@@ -727,7 +741,6 @@ class PainelVagas(discord.ui.View):
             cor_embed = discord.Color.brand_red()
 
         desc_embed = f"**Líder da PT:** <@{self.autor_id}>\n**Status:** {status_texto}\n"
-        desc_embed += f"🍕 **Foods:** {self.foods}\n"
         if self.call_id:
             desc_embed += f"🔊 **Call:** <#{self.call_id}>\n"
         if self.descricao:
@@ -893,11 +906,9 @@ class PainelVagas(discord.ui.View):
         await interaction.response.defer()
 
         lfg_cog = interaction.client.get_cog("LFG")
-        resultados = {}
-        participantes_reais = 0
         processou = False
         if lfg_cog:
-            resultados, participantes_reais, processou = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
+            _, processou = await lfg_cog._encerrar_conteudo(self, interaction.guild, interaction.message.jump_url)
 
         # Sempre re-renderiza o embed com o status final, mesmo se outra chamada já processou.
         await interaction.edit_original_response(embed=self.gerar_embed(), view=self)
@@ -908,23 +919,6 @@ class PainelVagas(discord.ui.View):
             return
 
         await interaction.followup.send(f"🛑 **{interaction.user.display_name}** deu Call Out e encerrou o conteúdo: **{self.conteudo}**!", delete_after=30)
-
-        if self.call_id and not resultados:
-            await interaction.followup.send(
-                f"⚠️ Conteúdo encerrado sem pontuação — mínimo de {MINIMO_JOGADORES_PONTOS} "
-                f"jogadores não atingido (apenas {participantes_reais} participaram)."
-            )
-        elif resultados:
-            linhas = []
-            for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
-                linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
-            embed_pts = discord.Embed(
-                title="🏆 Pontos do Conteúdo",
-                description="\n".join(linhas),
-                color=discord.Color.gold()
-            )
-            embed_pts.set_footer(text=f"Teto: {self.teto_pontos} pts ({self.foods} foods)")
-            await interaction.followup.send(embed=embed_pts)
 
 
 class ModalEditarConteudo(discord.ui.Modal, title="✏️ Editar Conteúdo"):
@@ -1282,16 +1276,8 @@ class ModalUsarTemplate(discord.ui.Modal, title="🎮 Criar Conteúdo (Template)
             placeholder="20:30 | amanha 20:30 | sex 20:30",
             required=False,
         )
-        self.foods_texto = discord.ui.TextInput(
-            label="Foods (1 food = 30min, teto de pontos)",
-            style=discord.TextStyle.short,
-            placeholder="Ex: 2 (pontos máx = 20)",
-            max_length=3,
-            required=True,
-        )
         self.add_item(self.titulo)
         self.add_item(self.horario_texto)
-        self.add_item(self.foods_texto)
 
     async def on_submit(self, interaction: discord.Interaction):
         conteudo = self.titulo.value.strip()
@@ -1303,24 +1289,12 @@ class ModalUsarTemplate(discord.ui.Modal, title="🎮 Criar Conteúdo (Template)
                 ephemeral=True
             )
 
-        foods_str = self.foods_texto.value.strip()
-        if not foods_str.isdigit():
-            return await interaction.response.send_message(
-                "❌ Foods precisa ser um número (mínimo 1).", ephemeral=True
-            )
-        foods = int(foods_str)
-        if foods < 1 or foods > 20:
-            return await interaction.response.send_message(
-                "❌ Foods deve ser entre 1 e 20.", ephemeral=True
-            )
-
         await self.cog.publicar_painel(
             interaction,
             conteudo,
             dict(self.template["vagas"]),
             self.template.get("descricao"),
             horario_input,
-            foods,
             dict(self.template.get("categoria_da_classe") or {c: CATEGORIA_PADRAO for c in self.template["vagas"]}),
         )
 
@@ -1406,13 +1380,6 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
         placeholder="20:30 | amanha 20:30 | sex 20:30",
         required=False,
     )
-    foods_texto = discord.ui.TextInput(
-        label="Foods (1 food = 30min, teto de pontos)",
-        style=discord.TextStyle.short,
-        placeholder="Ex: 2 (pontos máx = 20)",
-        max_length=3,
-        required=True,
-    )
 
     def __init__(self, cog: "LFG"):
         super().__init__()
@@ -1438,18 +1405,7 @@ class ModalCriarConteudo(discord.ui.Modal, title="🎮 Criar Conteúdo"):
                 ephemeral=True
             )
 
-        foods_str = self.foods_texto.value.strip()
-        if not foods_str.isdigit():
-            return await interaction.response.send_message(
-                "❌ Foods precisa ser um número (mínimo 1).", ephemeral=True
-            )
-        foods = int(foods_str)
-        if foods < 1 or foods > 20:
-            return await interaction.response.send_message(
-                "❌ Foods deve ser entre 1 e 20.", ephemeral=True
-            )
-
-        await self.cog.publicar_painel(interaction, conteudo, definicao_vagas, descricao, horario_input, foods, categorias)
+        await self.cog.publicar_painel(interaction, conteudo, definicao_vagas, descricao, horario_input, categorias)
 
 
 # ==========================================
@@ -1624,55 +1580,12 @@ class LFG(commands.Cog):
         dados["entrada"] = None
         await _salvar_presencas_mongo(call_id, self.presenca_calls[call_id])
 
-    def calcular_pontos(self, call_id, painel):
-        presencas = self.presenca_calls.pop(call_id, {})
-        asyncio.create_task(_remover_presencas_mongo(call_id))
-        for user_id, dados in presencas.items():
-            entrada = dados["entrada"]
-            if entrada is not None:
-                agora = datetime.now(timezone.utc)
-                if entrada.tzinfo is None:
-                    entrada = entrada.replace(tzinfo=timezone.utc)
-                dados["minutos"] += int((agora - entrada).total_seconds() / 60)
-
-        teto = painel.teto_pontos
-        inscritos = set()
-        for lista in painel.jogadores.values():
-            for mencao in lista:
-                uid = mencao.strip("<@!>")
-                if uid.isdigit():
-                    inscritos.add(uid)
-
-        resultados = {}
-        participantes_reais = 0
-        todos_users = set(inscritos) | set(presencas.keys())
-        for user_id in todos_users:
-            if user_id not in inscritos:
-                continue
-            dados = presencas.get(user_id, {"minutos": 0})
-            minutos = dados.get("minutos", 0)
-            if minutos <= 0:
-                continue
-            participantes_reais += 1
-            pontos = (minutos // 30) * 10
-            if pontos <= 0:
-                continue
-            pontos = min(pontos, teto)
-            resultados[user_id] = {"minutos": minutos, "pontos": pontos}
-
-        if participantes_reais < MINIMO_JOGADORES_PONTOS:
-            print(f"⚠️ calcular_pontos: apenas {participantes_reais} participante(s) real(is) — mínimo {MINIMO_JOGADORES_PONTOS} não atingido, sem pontuação")
-            asyncio.create_task(log_discord(self.bot, f"**{painel.conteudo}** encerrado sem pontuação — apenas {participantes_reais} participante(s) (mín: {MINIMO_JOGADORES_PONTOS})", "aviso"))
-            return {}, participantes_reais
-
-        return resultados, participantes_reais
-
     async def _encerrar_conteudo(self, painel, guilda, jump_url=None):
         """Método centralizado de encerramento. Usado tanto pelo botão manual quanto pelo auto.
 
-        Retorna (resultados, participantes_reais, processou) — processou=True apenas quando
+        Retorna (participantes_reais, processou) — processou=True apenas quando
         ESTA chamada foi quem realmente processou o encerramento (ganhou a trava atômica e
-        executou a limpeza). Quando a trava detecta duplicidade, a função retorna {}, 0, False
+        executou a limpeza). Quando a trava detecta duplicidade, a função retorna 0, False
         mas já deixa o painel em memória com status "encerrado".
         """
         print(f"🛑 _encerrar_conteudo chamado: conteudo={painel.conteudo}, call_id={painel.call_id}, jump_url={painel.jump_url}")
@@ -1680,6 +1593,9 @@ class LFG(commands.Cog):
         # Sincroniza o painel em memória SEMPRE, antes de qualquer verificação de trava,
         # pra que qualquer caller re-renderize o embed já com status final e botões desabilitados.
         painel._definir_status("encerrado")
+
+        agora_ts = datetime.now(timezone.utc).timestamp()
+        TRABALHO_TRAVA = 60  # segundos: além disso a trava "encerrando" é considerada órfã
 
         evento = None
         if painel.jump_url:
@@ -1697,9 +1613,18 @@ class LFG(commands.Cog):
                           and e.get("autor_id") == painel.autor_id), None)
 
         if evento and evento.get("status") in ("encerrando", "encerrado"):
-            # Outra chamada já processou (em memória). Só sincroniza o painel.
-            print(f"⚠️ _encerrar_conteudo: evento já em estado terminal ({evento['status']}), ignorando chamada duplicada")
-            return {}, 0, False
+            if evento.get("status") == "encerrado":
+                # Estado final: não reprocessa.
+                print(f"⚠️ _encerrar_conteudo: evento já encerrado, ignorando chamada duplicada")
+                return 0, False
+            # encerrando: bloqueia só se a trava for recente; presa há mais de TRABALHO_TRAVA
+            # ou sem timestamp (trava legada de antes desta mudança) = órfã -> reprocessa
+            desde = _para_ts(evento.get("encerrando_desde"))
+            if desde is not None and (agora_ts - desde) < TRABALHO_TRAVA:
+                print(f"⚠️ _encerrar_conteudo: encerramento em andamento (trava há {int(agora_ts - desde)}s), ignorando chamada duplicada")
+                return 0, False
+            preso_s = (agora_ts - desde) if desde is not None else None
+            print(f"🔁 _encerrar_conteudo: encerramento órfão detectado (preso há {int(preso_s) if preso_s is not None else '?'}s), reprocessando")
 
         if evento:
             if _usando_mongo():
@@ -1709,13 +1634,26 @@ class LFG(commands.Cog):
                 elif evento.get("call_id"):
                     filtro["call_id"] = evento["call_id"]
                 if filtro:
-                    filtro["status"] = {"$nin": ["encerrando", "encerrado"]}
-                    resultado = await colecao_eventos.find_one_and_update(filtro, {"$set": {"status": "encerrando"}})
+                    # Trava atômica: libera reprocessamento se a trava for antiga (órfã)
+                    # ou se o evento não tiver timestamp (trava legada de antes desta mudança).
+                    limite_trava = agora_ts - TRABALHO_TRAVA
+                    filtro["$or"] = [
+                        {"status": {"$nin": ["encerrando", "encerrado"]}},
+                        {"status": "encerrando", "$or": [
+                            {"encerrando_desde": {"$lt": limite_trava}},
+                            {"encerrando_desde": {"$exists": False}},
+                        ]},
+                    ]
+                    resultado = await colecao_eventos.find_one_and_update(
+                        filtro,
+                        {"$set": {"status": "encerrando", "encerrando_desde": agora_ts}},
+                    )
                     if resultado is None:
-                        print(f"⚠️ _encerrar_conteudo: encerramento já em andamento ou concluído no Mongo, ignorando")
-                        return {}, 0, False
+                        print(f"⚠️ _encerrar_conteudo: encerramento já em andamento ou concluído no Mongo (trava recente), ignorando")
+                        return 0, False
 
             evento["status"] = "encerrando"
+            evento["encerrando_desde"] = agora_ts
 
         if not evento:
             await log_discord(self.bot, f"Encerramento de **{painel.conteudo}** (call {painel.call_id}) não encontrou evento correspondente em `eventos_ativos`.", "aviso")
@@ -1724,17 +1662,13 @@ class LFG(commands.Cog):
         if painel.call_id:
             self._cancelar_timer_vazio(painel.call_id)
 
-        resultados = {}
         participantes_reais = 0
         if painel.call_id:
-            print(f"🛑 Calculando pontos para call_id={painel.call_id}, presencas={self.presenca_calls.get(str(painel.call_id), self.presenca_calls.get(painel.call_id, {}))}")
-            resultados, participantes_reais = self.calcular_pontos(painel.call_id, painel)
-            print(f"🛑 Resultados: {resultados} (participantes_reais={participantes_reais})")
-            if resultados:
-                await salvar_pontos(resultados, painel.conteudo)
-                print(f"✅ Pontos salvos no MongoDB: {len(resultados)} usuarios")
-                await log_discord(self.bot, f"**{painel.conteudo}** encerrado — {len(resultados)} jogadores pontuados ({participantes_reais} participantes reais)", "info")
+            presencas = self.presenca_calls.get(painel.call_id, self.presenca_calls.get(str(painel.call_id), {}))
+            participantes_reais = len([uid for uid, d in presencas.items() if d.get("minutos", 0) > 0])
+            await log_discord(self.bot, f"**{painel.conteudo}** encerrado — {participantes_reais} participante(s) na call", "info")
 
+        call_limpa = True  # só apaga presenças se a call foi deletada/confirmada inexistente
         if painel.call_id and guilda:
             try:
                 canal = await guilda.fetch_channel(painel.call_id)
@@ -1745,22 +1679,41 @@ class LFG(commands.Cog):
             except discord.Forbidden:
                 print(f"❌ Sem permissão pra deletar call {painel.call_id}")
                 await log_discord(self.bot, f"Sem permissão pra deletar call {painel.call_id} do conteúdo **{painel.conteudo}**", "erro")
+                call_limpa = False
             except Exception as e:
                 print(f"⚠️ Erro ao deletar call {painel.call_id}: {type(e).__name__}: {e}")
                 await log_discord(self.bot, f"Erro ao deletar call {painel.call_id} de **{painel.conteudo}**: {type(e).__name__}: {e}", "erro")
+                call_limpa = False
 
         self.timers_vazio.pop(painel.call_id, None)
+        if painel.call_id and call_limpa:
+            self.presenca_calls.pop(painel.call_id, None)
+            self.presenca_calls.pop(str(painel.call_id), None)
+            await _remover_presencas_mongo(painel.call_id)
         if evento:
             evento["status"] = "encerrado"
+            evento.pop("encerrando_desde", None)
         await salvar_eventos(self.eventos_ativos)
-        return resultados, participantes_reais, True
+        return participantes_reais, True
 
     async def _auto_encerrar(self, call_id):
         print(f"🔁 _auto_encerrar iniciado para call_id={call_id} (tipo={type(call_id).__name__})")
         await asyncio.sleep(self.TEMPO_TOLERANCIA_VAZIA)
         print(f"🔁 Timer expirou para call_id={call_id}. Verificando estado...")
 
-        evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and e.get("status", "formando") not in ("encerrado", "encerrando")), None)
+        agora_ts = datetime.now(timezone.utc).timestamp()
+        TRABALHO_TRAVA = 60  # segundos: além disso a trava "encerrando" é considerada órfã
+
+        def _reprocessavel(e):
+            st = e.get("status", "formando")
+            if st == "encerrado":
+                return False
+            if st == "encerrando":
+                desde = _para_ts(e.get("encerrando_desde"))
+                return desde is None or (agora_ts - desde) >= TRABALHO_TRAVA
+            return True
+
+        evento = next((e for e in self.eventos_ativos if e.get("call_id") == call_id and _reprocessavel(e)), None)
         if not evento:
             print(f"⚠️ _auto_encerrar: evento não encontrado para call_id={call_id}. call_ids_ativos={[e.get('call_id') for e in self.eventos_ativos]}")
             self.timers_vazio.pop(call_id, None)
@@ -1785,7 +1738,8 @@ class LFG(commands.Cog):
         painel = None
         msg_id = None
         for mid, p in self.paineis_ativos.items():
-            if p.call_id == call_id and p.status not in ("encerrado", "encerrando"):
+            # Painel normal OU painel de um encerramento órfão (status encerrado por crash, evento preso em encerrando)
+            if p.call_id == call_id and (p.status not in ("encerrado", "encerrando") or (evento and evento.get("status") == "encerrando")):
                 painel = p
                 msg_id = mid
                 break
@@ -1795,7 +1749,7 @@ class LFG(commands.Cog):
             return
 
         print(f"✅ _auto_encerrando: call_id={call_id}, painel.msg_id={msg_id}, conteudo={painel.conteudo}")
-        resultados, participantes_reais, processou = await self._encerrar_conteudo(painel, guilda)
+        participantes_reais, processou = await self._encerrar_conteudo(painel, guilda)
 
         if processou:
             await log_discord(self.bot, f"Auto-encerramento do conteúdo **{painel.conteudo}** (call {call_id} vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min)", "info")
@@ -1805,27 +1759,10 @@ class LFG(commands.Cog):
             for ch in guilda.text_channels:
                 try:
                     msg = await ch.fetch_message(msg_id)
-                    # Sempre re-renderiza o embed final, mesmo se outra chamada já processou.
                     await msg.edit(embed=painel.gerar_embed(), view=painel)
                     asyncio.create_task(_deletar_painel_apos_delay(msg, 300))
                     if processou:
                         await ch.send(f"⏳ Call ficou vazia por {self.TEMPO_TOLERANCIA_VAZIA // 60} min. Conteúdo **{painel.conteudo}** encerrado automaticamente.", delete_after=30)
-                        if not resultados:
-                            await ch.send(
-                                f"⚠️ Conteúdo encerrado sem pontuação — mínimo de {MINIMO_JOGADORES_PONTOS} "
-                                f"jogadores não atingido (apenas {participantes_reais} participaram)."
-                            )
-                        else:
-                            linhas = []
-                            for uid, dados in sorted(resultados.items(), key=lambda x: -x[1]["pontos"]):
-                                linhas.append(f"<@{uid}> — {dados['pontos']} pts ({dados['minutos']} min)")
-                            embed_pts = discord.Embed(
-                                title="🏆 Pontos do Conteúdo",
-                                description="\n".join(linhas),
-                                color=discord.Color.gold()
-                            )
-                            embed_pts.set_footer(text=f"Teto: {painel.teto_pontos} pts ({painel.foods} foods)")
-                            await ch.send(embed=embed_pts)
                     encontrou = True
                     break
                 except Exception:
@@ -1990,7 +1927,7 @@ class LFG(commands.Cog):
                         self._iniciar_timer_vazio(call_id)
                 break
 
-    async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, foods=1, categoria_da_classe=None):
+    async def publicar_painel(self, interaction: discord.Interaction, conteudo, definicao_vagas, descricao, horario_input, categoria_da_classe=None):
         """Cria e posta o painel de vagas — usado tanto pelo fluxo 'do zero' quanto por template."""
         erro = _validar_definicao_vagas(definicao_vagas)
         if erro:
@@ -2022,7 +1959,7 @@ class LFG(commands.Cog):
         if call_id:
             self._iniciar_timer_vazio(call_id)
 
-        painel = PainelVagas(conteudo, definicao_vagas, interaction.user.id, unix_timestamp, descricao, call_id, foods, categoria_da_classe=categoria_da_classe)
+        painel = PainelVagas(conteudo, definicao_vagas, interaction.user.id, unix_timestamp, descricao, call_id, categoria_da_classe=categoria_da_classe)
         embed_inicial = painel.gerar_embed()
 
         id_cargo_membro = CARGOS.get("DIE HARD")
@@ -2049,7 +1986,6 @@ class LFG(commands.Cog):
             "message_id": str(mensagem_painel.id),
             "status": "formando",
             "call_id": call_id,
-            "foods": foods,
             "descricao": descricao,
             "max_vagas": definicao_vagas,
             "categoria_da_classe": dict(categoria_da_classe),
@@ -2157,7 +2093,7 @@ class LFG(commands.Cog):
 
         evento["status"] = "encerrado"
         await salvar_eventos(self.eventos_ativos)
-        await ctx.send(f"✅ Conteúdo **{evento.get('conteudo')}** encerrado forçadamente (sem cálculo de pontos, painel original indisponível).")
+        await ctx.send(f"✅ Conteúdo **{evento.get('conteudo')}** encerrado forçadamente (painel original indisponível).")
 
 
 # Função para inicializar e plugar essa engrenagem no main.py

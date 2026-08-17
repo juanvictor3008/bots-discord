@@ -1,214 +1,108 @@
 import discord
 from discord.ext import commands
-import aiohttp
-import asyncio
+from discord import app_commands
+from datetime import datetime, timezone
 
-# Importa as variáveis EXATAMENTE como estão no seu config.py
-from config import GUILDA_ALBION_ID, ALIANCA_ALBION_ID, CARGOS
+from config import CARGOS, MONGO_URI, colecao_membros, colecao_recruitment_points, CARGOS_PERMITIDOS_REGISTRAR
 
-API_BUSCA = 'https://gameinfo.albiononline.com/api/gameinfo/search?q={}'
+
+def _usando_mongo():
+    return MONGO_URI is not None and colecao_membros is not None
+
+
+def _eh_staff(usuario):
+    if usuario.guild_permissions.administrator:
+        return True
+    ids = [CARGOS.get(nome) for nome in CARGOS_PERMITIDOS_REGISTRAR if CARGOS.get(nome)]
+    return any(c.id in ids for c in usuario.roles)
+
 
 class RegistrarCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.fila = asyncio.Queue()
-        self.worker_task = None
 
-    @commands.Cog.listener()
-    async def on_ready(self):
-        if not self.worker_task:
-            self.worker_task = self.bot.loop.create_task(self.processar_fila())
+    @app_commands.command(name="registrar", description="Registra um membro com o nick do jogo (somente staff)")
+    @app_commands.describe(
+        membro="Membro do Discord a ser registrado",
+        nick="Nick do personagem no Albion Online"
+    )
+    async def registrar(self, interaction: discord.Interaction, membro: discord.Member, nick: str):
+        if not _eh_staff(interaction.user):
+            return await interaction.response.send_message(
+                "❌ Apenas recrutadores e staff podem usar este comando.",
+                ephemeral=True,
+            )
 
-    def cog_unload(self):
-        if self.worker_task:
-            self.worker_task.cancel()
+        nick = nick.strip()
+        if not nick:
+            return await interaction.response.send_message(
+                "❌ Informe o nick do jogo.", ephemeral=True,
+            )
 
-    # ——— WORKER QUE PROCESSA UM POR VEZ (evita B.O na API) ———
-    async def processar_fila(self):
-        await self.bot.wait_until_ready()
-        while not self.bot.is_closed():
-            item = await self.fila.get()
-            membro, nick, msg_status, guild = item
+        if not _usando_mongo():
+            return await interaction.response.send_message(
+                "❌ Sistema de registro indisponível (MongoDB desconectado).", ephemeral=True,
+            )
 
-            try:
-                await self.buscar_e_registrar(membro, nick, msg_status, guild)
-            except Exception as e:
-                print(f'❌ Erro ao registrar {nick}: {e}')
-                try:
-                    await msg_status.edit(content=f'❌ Erro ao consultar a API pra **{nick}**. Tenta novamente.')
-                except:
-                    pass
+        await interaction.response.defer()
 
-            await asyncio.sleep(2)  # intervalo entre requests
-            self.fila.task_done()
+        guild = interaction.guild
+        cargo_dh = guild.get_role(CARGOS.get("DIE HARD"))
+        cargo_recem = guild.get_role(CARGOS.get("recém chegado"))
 
-    # ——— REGISTRO FALLBACK VIA ROSTER CACHEADO (API instável) ———
-    async def _registrar_pelo_cache(self, membro: discord.Member, nick: str, msg_status, guild: discord.Guild):
-        """Registra como Die Hard usando o roster sincronizado pela auditoria quando a API ao vivo falha."""
-        cargo = guild.get_role(CARGOS.get("DIE HARD"))
-        cargo_recem_chegado = guild.get_role(CARGOS.get("recém chegado"))
-        novo_nick = f'[DH] {nick}'
+        novo_nick = f"[DH] {nick}"
+        erros = []
 
         try:
             await membro.edit(nick=novo_nick[:32])
-            if cargo:
-                await membro.add_roles(cargo)
-            if cargo_recem_chegado and cargo_recem_chegado in membro.roles:
-                await membro.remove_roles(cargo_recem_chegado)
-            cargo_menção = f'<@&{cargo.id}>' if cargo else '**DIE HARD**'
-            await msg_status.edit(
-                content=f'✅ **{nick}** registrado como membro da **Die Hard** '
-                        f'(dados do último roster sincronizado — API instável)!\n'
-                        f'👤 Apelido alterado para `{novo_nick}`\n'
-                        f'🛡️ Cargo {cargo_menção} atribuído a {membro.mention}.'
-            )
         except discord.Forbidden:
-            await msg_status.edit(
-                content=f'❌ Sem permissão pra alterar apelido/cargo de {membro.mention}. Verifica se meu cargo está acima do dele.'
-            )
+            erros.append("apelido (hierarquia)")
+        except Exception:
+            erros.append("apelido")
 
-    # ——— BUSCA NA API E REGISTRA ———
-    async def buscar_e_registrar(self, membro: discord.Member, nick: str, msg_status, guild: discord.Guild):
-        MAX_TENTATIVAS = 3
-        TIMEOUT = 25  # API com picos de resposta lenta (30-40s+); 15s estourava com frequência
-
-        # Cache do roster da guilda sincronizado pela auditoria (fallback quando a API ao vivo falha)
-        automacoes_cog = self.bot.get_cog("Automacoes") if self.bot else None
-        roster_cache = automacoes_cog.get_roster_cacheado() if automacoes_cog else None
-        nick_no_roster = bool(roster_cache) and nick.lower() in roster_cache
-
-        dados = None
-        erro_api = None
-        async with aiohttp.ClientSession() as session:
-            url = API_BUSCA.format(nick)
-            for tentativa in range(1, MAX_TENTATIVAS + 1):
-                try:
-                    async with session.get(url, timeout=aiohttp.ClientTimeout(total=TIMEOUT)) as resp:
-                        if resp.status == 200:
-                            dados = await resp.json()
-                            break
-                        if resp.status in (502, 503, 504):
-                            # Erros temporários: retry com backoff crescente
-                            erro_api = f'API do Albion instável ({resp.status})'
-                        else:
-                            # Erros sem retry (404, 400, ...)
-                            return await msg_status.edit(content=f'❌ API retornou erro ({resp.status}) pra **{nick}**.')
-                except (asyncio.TimeoutError, aiohttp.ClientError) as e:
-                    # Timeout ou falha de conexão: mesma política de retry
-                    erro_api = f'API do Albion instável ({type(e).__name__})'
-
-                if tentativa < MAX_TENTATIVAS:
-                    await msg_status.edit(
-                        content=f'🔍 Buscando **{nick}**... (API lenta, tentativa {tentativa + 1}/{MAX_TENTATIVAS})'
-                    )
-                    await asyncio.sleep(5 * tentativa)
-                else:
-                    break
-
-        if dados is None:
-            if nick_no_roster:
-                # Fallback: completo o registro com os dados do último roster sincronizado
-                return await self._registrar_pelo_cache(membro, nick, msg_status, guild)
-            return await msg_status.edit(
-                content=f'❌ {erro_api or "API do Albion não respondeu"} após {MAX_TENTATIVAS} tentativas. Tenta de novo em alguns minutos.'
-            )
-
-        jogadores = dados.get('players', [])
-
-        # Filtra todos com o nick exato
-        candidatos = [p for p in jogadores if p.get('Name', '').lower() == nick.lower()]
- 
-        # Prioriza quem tem GuildId (evita pegar perfil errado quando há duplicatas)
-        jogador = next((p for p in candidatos if p.get('GuildId')), None)
- 
-        # Se nenhum tiver guilda, pega o primeiro
-        if not jogador:
-            jogador = candidatos[0] if candidatos else None
-
-        if not jogador:
-            return await msg_status.edit(content=f'❌ Personagem **{nick}** não encontrado no Albion Online.')
-
-        nome_real      = jogador.get('Name')
-        guild_id       = jogador.get('GuildId')
-        guild_name     = jogador.get('GuildName')
-        alliance_id    = jogador.get('AllianceId')
-
-        # ——— É DA DIE HARD ———
-        if guild_id == GUILDA_ALBION_ID:
-            cargo = guild.get_role(CARGOS.get("DIE HARD"))
-            cargo_recem_chegado = guild.get_role(CARGOS.get("recém chegado"))
-            novo_nick = f'[DH] {nome_real}'
-
+        if cargo_dh:
             try:
-                await membro.edit(nick=novo_nick[:32])
-                if cargo:
-                    await membro.add_roles(cargo)
-                if cargo_recem_chegado and cargo_recem_chegado in membro.roles:
-                    await membro.remove_roles(cargo_recem_chegado)
-                await msg_status.edit(
-                    content=f'✅ **{nome_real}** registrado como membro da **Die Hard**!\n'
-                            f'👤 Apelido alterado para `{novo_nick}`\n'
-                            f'🛡️ Cargo <@&{cargo.id}> atribuído a {membro.mention}.'
-                )
+                await membro.add_roles(cargo_dh)
             except discord.Forbidden:
-                await msg_status.edit(content=f'❌ Sem permissão pra alterar apelido/cargo de {membro.mention}. Verifica se meu cargo está acima do dele.')
-            return
+                erros.append("cargo DIE HARD (hierarquia)")
+            except Exception:
+                erros.append("cargo DIE HARD")
 
-        # ——— É DA ALIANÇA (mas não da Die Hard) ———
-        if ALIANCA_ALBION_ID and alliance_id == ALIANCA_ALBION_ID:
-            cargo = guild.get_role(CARGOS.get("aliado"))
-            novo_nick = f'[ALLY] {nome_real}'
-
+        if cargo_recem and cargo_recem in membro.roles:
             try:
-                await membro.edit(nick=novo_nick[:32])
-                if cargo:
-                    await membro.add_roles(cargo)
-                await msg_status.edit(
-                    content=f'✅ **{nome_real}** registrado como **Aliado** (guilda: {guild_name})!\n'
-                            f'👤 Apelido alterado para `{novo_nick}`\n'
-                            f'🤝 Cargo <@&{cargo.id}> atribuído a {membro.mention}.'
-                )
+                await membro.remove_roles(cargo_recem)
             except discord.Forbidden:
-                await msg_status.edit(content=f'❌ Sem permissão pra alterar apelido/cargo de {membro.mention}.')
-            return
+                erros.append("remover recém chegado (hierarquia)")
+            except Exception:
+                erros.append("remover recém chegado")
 
-        # ——— NÃO É NEM DIE HARD NEM ALIANÇA ———
-        await msg_status.edit(
-            content=f'⚠️ **{nome_real}** não pertence à guilda principal nem à aliança.\n'
-                    f'Guilda atual: **{guild_name or "Sem guilda"}**'
+        await colecao_membros.update_one(
+            {"_id": str(membro.id)},
+            {"$set": {
+                "nick": nick,
+                "registrado_por": str(interaction.user.id),
+                "data": datetime.now(timezone.utc),
+            }},
+            upsert=True,
         )
 
-    # ——— COMANDO !registrar NICK ou !registrar @membro NICK ———
-    @commands.command()
-    async def registrar(self, ctx, alvo: discord.Member = None, *, nick: str = None):
-        """Uso: !registrar Zezinho OU !registrar @membro Zezinho"""
-        
-        # Se a pessoa não marcou ninguém, o alvo é ela mesma e a primeira palavra é o nick
-        if nick is None and alvo is None:
-             return await ctx.send('❌ Uso correto: `!registrar SeuNick` ou `!registrar @membro Nick`', delete_after=10)
-             
-        if nick is None and isinstance(alvo, discord.Member) == False:
-             pass 
+        await colecao_recruitment_points.update_one(
+            {"_id": str(interaction.user.id)},
+            {"$inc": {"pontos": 1}},
+            upsert=True,
+        )
 
-        # Lógica para permitir !registrar Zezinho (onde alvo vira o próprio autor da msg)
-        membro_final = ctx.author
-        nick_final = ""
+        linhas = [
+            f"✅ **{nick}** registrado para {membro.mention}!",
+            f"👤 Apelido: `{novo_nick[:32]}`",
+            f"🛡️ Cargo DIE HARD atribuído.",
+        ]
+        if erros:
+            linhas.append(f"\n⚠️ Alguns passos falharam: {', '.join(erros)}")
+            linhas.append("Verifique a hierarquia de cargos do bot.")
 
-        partes = ctx.message.content.split()
-        if len(partes) >= 2:
-            if ctx.message.mentions:
-                membro_final = ctx.message.mentions[0]
-                nick_final = " ".join(partes[2:])
-            else:
-                nick_final = " ".join(partes[1:])
-        
-        if not nick_final:
-             return await ctx.send('❌ Você esqueceu de informar o Nick!', delete_after=5)
+        await interaction.followup.send("\n".join(linhas))
 
-        posicao = self.fila.qsize() + 1
-        msg_status = await ctx.send(f'🔍 Buscando **{nick_final}** na API do Albion... (posição na fila: {posicao})')
-
-        await self.fila.put((membro_final, nick_final, msg_status, ctx.guild))
 
 async def setup(bot):
     await bot.add_cog(RegistrarCog(bot))

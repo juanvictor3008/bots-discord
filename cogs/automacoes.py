@@ -9,8 +9,7 @@ from datetime import datetime, timedelta, timezone
 from config import (
     CARGOS, GUILDA_ALBION_ID, ALIANCA_ALBION_ID,
     MONGO_URI, colecao_tempo_call,
-    MINIMO_PESSOAS_CALL, PONTOS_POR_CICLO,
-    MULTIPLICADOR_CALLER, MENSAGEM_CLASSES_ID, REACOES_CLASSES, CANAIS_GERADORES_IDS,
+    MENSAGEM_CLASSES_ID, REACOES_CLASSES, CANAIS_GERADORES_IDS,
     CANAL_LOGS_ID
 )
 from cogs.lfg import _eh_staff
@@ -112,11 +111,6 @@ class Automacoes(commands.Cog):
         except Exception as e:
             print(f"⚠️ Erro ao iniciar auditoria_guilda: {e}")
         try:
-            if not self.farm_de_pontos.is_running():
-                self.farm_de_pontos.start()
-        except Exception as e:
-            print(f"⚠️ Erro ao iniciar farm_de_pontos: {e}")
-        try:
             if not self.atualizar_tempo_call.is_running():
                 self.atualizar_tempo_call.start()
         except Exception as e:
@@ -157,13 +151,10 @@ class Automacoes(commands.Cog):
             return
         print(f"📊 Roster da guilda: {len(roster_nomes)} jogadores.")
 
-        # Guarda o roster pra reuso no registro (fallback quando a API ao vivo falha)
         self.ultimo_roster = roster_nomes
         self.roster_atualizado_em = datetime.now(timezone.utc)
 
-        demovidos = []
-        falhas = []
-
+        nao_na_guilda = []
         nomes_imunes = ["lider", "recrutador", "moderador", "caller", "SUB-LIDER"]
         ids_imunes = [CARGOS.get(nome) for nome in nomes_imunes if CARGOS.get(nome)]
 
@@ -173,10 +164,8 @@ class Automacoes(commands.Cog):
                 break
             if membro.bot:
                 continue
-
             if not cargo_dh or cargo_dh not in membro.roles:
                 continue
-
             if any(c.id in ids_imunes for c in membro.roles):
                 continue
 
@@ -187,69 +176,21 @@ class Automacoes(commands.Cog):
             if nick.lower() in roster_nomes:
                 continue
 
-            # Não está no roster da guilda → remove SÓ o cargo DIE HARD (preserva recém chegado e outros)
-            try:
-                await membro.remove_roles(cargo_dh)
-                demovidos.append(membro)
-                print(f"⚠️ {membro.display_name} foi rebaixado.")
-
-                # Remove a tag [DH] do apelido
-                nick_atual = membro.display_name
-                novo_nick = None
-                if nick_atual.lower().startswith("[dh] "):
-                    novo_nick = nick_atual[5:]
-                elif nick_atual.lower() == "[dh]":
-                    novo_nick = nick_atual
-                if novo_nick is not None and novo_nick.strip():
-                    try:
-                        await membro.edit(nick=novo_nick[:32])
-                        await asyncio.sleep(2)
-                    except discord.Forbidden:
-                        await log_discord(self.bot, f"⚠️ **Auditoria:** não consegui remover a tag `[DH]` do apelido de **{membro.display_name}** (hierarquia).", "aviso")
-
-                ganhou_recem_chegado = False
-                if not any(c.id in CARGOS.values() for c in membro.roles):
-                    cargo_recem = guilda_discord.get_role(CARGOS.get("recém chegado"))
-                    if cargo_recem:
-                        try:
-                            await membro.add_roles(cargo_recem)
-                            ganhou_recem_chegado = True
-                        except discord.Forbidden:
-                            await log_discord(self.bot, f"⚠️ **Auditoria:** não consegui dar o cargo recém chegado pra **{membro.display_name}** (hierarquia).", "aviso")
-
-                try:
-                    aviso = "⚠️ **Aviso Automático:** Seu cargo de **Die Hard** foi removido porque nosso sistema detectou que você não está mais na guilda no jogo. Se isso for um erro, use o comando `!registrar` novamente!"
-                    if ganhou_recem_chegado:
-                        aviso += "\n🆕 Você recebeu o cargo **recém chegado** enquanto não estiver registrado na guilda."
-                    await membro.send(aviso)
-                except discord.Forbidden:
-                    pass
-            except discord.Forbidden:
-                falhas.append(f"• {membro.mention} (`{nick}`) — **sem permissão**: o cargo do bot precisa ficar ACIMA do cargo dele")
-                await log_discord(self.bot, f"❌ **Auditoria:** sem permissão pra remover cargo de **{membro.display_name}** — verifica a hierarquia de cargos do bot.", "erro")
-                print(f"❌ Sem permissão pra rebaixar {membro.display_name}")
-            except Exception as e:
-                falhas.append(f"• {membro.mention} (`{nick}`) — erro ao remover cargo: {type(e).__name__}: {e}")
-                await log_discord(self.bot, f"❌ **Auditoria:** erro ao remover cargo de **{membro.display_name}**: {type(e).__name__}: {e}", "erro")
-
-            await asyncio.sleep(5)
+            nao_na_guilda.append((membro, nick))
 
         canal_logs = self.bot.get_channel(CANAL_LOGS_ID)
 
-        if demovidos or falhas:
+        if nao_na_guilda:
             if canal_logs:
-                desc = ""
-                if demovidos:
-                    nomes = "\n".join(f"• {m.mention} (`{m.display_name}`)" for m in demovidos)
-                    desc += f"**{len(demovidos)}** membro(s) tiveram o cargo DIE HARD removido:\n{nomes}\n\n"
-                if falhas:
-                    desc += f"**{len(falhas)}** falha(s):\n" + "\n".join(falhas)
+                nomes = "\n".join(f"• {m.mention} (`{n}`)" for m, n in nao_na_guilda)
+                desc = f"**{len(nao_na_guilda)}** membro(s) com cargo DIE HARD **não encontrados** no roster da guilda (ação manual necessária):\n{nomes}"
                 embed = discord.Embed(
-                    title="🔍 Auditoria — Relatório",
+                    title="🔍 Auditoria — Membros Fora do Roster",
                     description=desc,
-                    color=discord.Color.red() if demovidos else discord.Color.gold(),
-                    timestamp=datetime.now(timezone.utc)
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now(timezone.utc),
                 )
+                embed.set_footer(text="Nenhuma ação automática foi tomada. Verifique manualmente.")
                 try:
                     await canal_logs.send(embed=embed)
                 except Exception as e:
@@ -257,24 +198,17 @@ class Automacoes(commands.Cog):
         else:
             if canal_logs:
                 embed = discord.Embed(
-                    title="🔍 Auditoria — Sem problemas",
-                    description="Todos os membros com cargo DIE HARD estão na guilda.",
+                    title="✅ Auditoria — Tudo OK",
+                    description="Todos os membros com cargo DIE HARD estão no roster da guilda.",
                     color=discord.Color.green(),
-                    timestamp=datetime.now(timezone.utc)
+                    timestamp=datetime.now(timezone.utc),
                 )
                 try:
                     await canal_logs.send(embed=embed)
                 except Exception as e:
                     print(f"⚠️ Erro ao enviar relatório de auditoria: {e}")
 
-        print("✅ Base concluída.")
-
-    # ==========================================
-    # SISTEMA DE FARM DE PONTOS EM CALL
-    # ==========================================
-    @tasks.loop(minutes=10)
-    async def farm_de_pontos(self):
-        pass
+        print(f"✅ Auditoria concluída: {len(nao_na_guilda)} membro(s) fora do roster.")
 
     # ==========================================
     # SISTEMA DE RASTREAMENTO DE TEMPO INDIVIDUAL EM CALL

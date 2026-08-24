@@ -67,5 +67,23 @@ async def on_ready():
     if not manter_mongo_vivo.is_running():
         manter_mongo_vivo.start()
 
-keep_alive() 
-bot.run(os.getenv('TOKEN_DO_BOT'))
+keep_alive()
+
+token = os.getenv('TOKEN_DO_BOT')
+espera = 30
+while True:
+    try:
+        bot.run(token)
+    except discord.LoginFailure:
+        print("❌ Token inválido — encerrando. Confira TOKEN_DO_BOT no .env da Render.")
+        break
+    except discord.HTTPException as e:
+        if e.status == 429:
+            print(f"⚠️ 429 do Discord (bloqueio global). Aguardando {espera}s pra tentar logar de novo...")
+            import time
+            time.sleep(espera)
+            espera = min(espera * 2, 900)
+            continue
+        raise
+    else:
+        break
